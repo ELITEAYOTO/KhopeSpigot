@@ -1,0 +1,1189 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KhopeSpigot <fork@localhost>
+Date: Mon, 4 May 2026 23:02:01 +0200
+Subject: [PATCH] Sparrow NBT/CIT Layer - custom items, armor, mining, and
+ durability
+
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index f1769ecc8fe0725171b638b7d8b7bbbc9e5250d1..be27901aae38d68b3c248d446a9850384abeded8 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -128,3 +128,4 @@ public class PandaSpigotConfig {
+ 
+     public int tabSpamLimit = 500;
+ }
++
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/SparrowArmorConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/SparrowArmorConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d02b540f631a9b84c5b1099fcb68325945aa316b
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/config/SparrowArmorConfig.java
+@@ -0,0 +1,166 @@
++package com.hpfxd.pandaspigot.config;
++
++import java.io.File;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.logging.Logger;
++import java.util.regex.Pattern;
++
++import org.spongepowered.configurate.CommentedConfigurationNode;
++import org.spongepowered.configurate.objectmapping.ConfigSerializable;
++import org.spongepowered.configurate.objectmapping.ObjectMapper;
++import org.spongepowered.configurate.objectmapping.meta.Comment;
++import org.spongepowered.configurate.util.MapFactories;
++import org.spongepowered.configurate.util.NamingSchemes;
++
++import com.google.common.base.Throwables;
++import com.hpfxd.configurate.eoyaml.EOYamlConfigurationLoader;
++
++/**
++ * SparrowMC armor configuration — loaded from sparrow-armor.yml.
++ *
++ * Covers per-piece protection and durability for custom armor keyed by sparrowmc-item NBT tag,
++ * and optional family definitions for set detection.
++ *
++ * Armor is ALWAYS configured per piece. No automatic full-set bonus is applied from this file.
++ * A chestplate must always provide more protection than leggings, and leggings more than boots/helmet.
++ *
++ * All ids must be lowercase ASCII. Any non-conforming id is logged as a warning at load time.
++ */
++@ConfigSerializable
++@SuppressWarnings({"FieldCanBeLocal", "FieldMayBeFinal"})
++public class SparrowArmorConfig {
++
++    private static final Pattern VALID_ID = Pattern.compile("[a-z0-9_\\-]+");
++    private static final Logger LOGGER = Logger.getLogger("Minecraft");
++
++    private static SparrowArmorConfig config;
++
++    public static void init(File file) {
++        EOYamlConfigurationLoader loader = EOYamlConfigurationLoader.builder()
++                .file(file)
++                .defaultOptions(o -> o
++                        .header("SparrowMC armor configuration.\n" +
++                                "Per-piece protection and durability for custom armor (sparrowmc-item NBT tag).\n" +
++                                "\n" +
++                                "Core rule — armor is always per piece, never a set bonus:\n" +
++                                "  - chestplate > leggings > helmet/boots (vanilla-like hierarchy)\n" +
++                                "  - No automatic bonus is applied when a full set is worn\n" +
++                                "  - customArmorSets is for optional detection only, not for gameplay effects\n" +
++                                "\n" +
++                                "Protection scale (vanilla armor points):\n" +
++                                "  Vanilla diamond full set = 20 points total\n" +
++                                "  Typical per-piece: 3 (boots) / 8 (chestplate) / 6 (leggings) / 3 (helmet)\n" +
++                                "  Custom bonus is additive on top of the vanilla ItemArmor base value.\n" +
++                                "\n" +
++                                "Durability scale:\n" +
++                                "  1.0 = vanilla wear, 0.5 = lasts ~2x longer, 0.0 = indestructible\n" +
++                                "\n" +
++                                "Rules:\n" +
++                                "  - All ids must be lowercase ASCII: letters a-z, digits 0-9, underscores, hyphens.\n" +
++                                "  - Ids must match exactly the sparrowmc-item tag and the CIT pack.\n" +
++                                "  - Non-conforming ids are logged as warnings at startup and on reload.\n" +
++                                "  - Leave a section empty to preserve vanilla behavior on all pieces.")
++                        .mapFactory(MapFactories.insertionOrdered())
++                        .serializers(build -> build.registerAnnotatedObjects(ObjectMapper.factoryBuilder()
++                                .defaultNamingScheme(NamingSchemes.CAMEL_CASE)
++                                .build())))
++                .build();
++
++        try {
++            CommentedConfigurationNode root = loader.load();
++            config = root.get(SparrowArmorConfig.class);
++            root.set(config);
++            loader.save(root);
++            validateIds(config);
++        } catch (Exception e) {
++            throw Throwables.propagate(e);
++        }
++    }
++
++    private static void validateIds(SparrowArmorConfig cfg) {
++        if (cfg.customArmorProtection != null) {
++            for (String id : cfg.customArmorProtection.keySet()) {
++                if (!VALID_ID.matcher(id).matches()) {
++                    LOGGER.warning("[Sparrow] sparrow-armor.yml: invalid id '" + id
++                            + "' in customArmorProtection — ids must match [a-z0-9_\\-]+");
++                }
++            }
++        }
++        if (cfg.customArmorDurabilityMultiplier != null) {
++            for (String id : cfg.customArmorDurabilityMultiplier.keySet()) {
++                if (!VALID_ID.matcher(id).matches()) {
++                    LOGGER.warning("[Sparrow] sparrow-armor.yml: invalid id '" + id
++                            + "' in customArmorDurabilityMultiplier — ids must match [a-z0-9_\\-]+");
++                }
++            }
++        }
++        if (cfg.customArmorSets != null) {
++            for (Map.Entry<String, List<String>> entry : cfg.customArmorSets.entrySet()) {
++                String setName = entry.getKey();
++                if (!VALID_ID.matcher(setName).matches()) {
++                    LOGGER.warning("[Sparrow] sparrow-armor.yml: invalid set name '" + setName
++                            + "' in customArmorSets — names must match [a-z0-9_\\-]+");
++                }
++                if (entry.getValue() != null) {
++                    for (String pieceId : entry.getValue()) {
++                        if (!VALID_ID.matcher(pieceId).matches()) {
++                            LOGGER.warning("[Sparrow] sparrow-armor.yml: invalid piece id '" + pieceId
++                                    + "' in customArmorSets." + setName + " — ids must match [a-z0-9_\\-]+");
++                        }
++                    }
++                }
++            }
++        }
++    }
++
++    public static SparrowArmorConfig get() {
++        return config;
++    }
++
++    // ----------------------------------------------------------------------------
++
++    @Comment("Additive protection bonuses for custom armor pieces (sparrowmc-item NBT tag).\n" +
++            "Each key is a sparrowmc-item id, each value is the bonus in vanilla armor points.\n" +
++            "Vanilla scale: 1-3 per helmet or boots, 5-8 per chestplate. Full vanilla diamond = 20 points.\n" +
++            "The bonus is additive on top of the vanilla ItemArmor base value.\n" +
++            "Keep the chestplate higher than leggings, and leggings higher than helmet and boots.\n" +
++            "Leave empty to preserve vanilla protection on all pieces.\n" +
++            "Example:\n" +
++            "  customArmorProtection:\n" +
++            "    azurite_helmet: 4\n" +
++            "    azurite_chestplate: 9\n" +
++            "    azurite_leggings: 7\n" +
++            "    azurite_boots: 4")
++    public Map<String, Integer> customArmorProtection = new HashMap<>();
++
++    @Comment("Durability cost multipliers for custom armor pieces (sparrowmc-item NBT tag).\n" +
++            "Applied in PlayerInventory.a(float) — the point where all 4 armor slots lose durability after damage.\n" +
++            "  1.0 = vanilla behavior\n" +
++            "  0.5 = armor lasts ~2x longer (50%% probabilistic skip per damage call)\n" +
++            "  0.0 = indestructible (all durability loss is skipped)\n" +
++            "  2.0 = armor wears twice as fast\n" +
++            "Probabilistic skip for values below 1.0: Unbreaking and PlayerItemDamageEvent are\n" +
++            "not triggered for skipped durability calls.\n" +
++            "Leave empty to preserve vanilla durability on all armor pieces.\n" +
++            "Example:\n" +
++            "  customArmorDurabilityMultiplier:\n" +
++            "    azurite_helmet: 0.85\n" +
++            "    azurite_chestplate: 0.80\n" +
++            "    azurite_leggings: 0.82\n" +
++            "    azurite_boots: 0.88")
++    public Map<String, Double> customArmorDurabilityMultiplier = new HashMap<>();
++
++    @Comment("Optional armor family definitions for explicit set detection only.\n" +
++            "This section does NOT affect base armor balance. Protection and durability remain\n" +
++            "configured per piece above. No automatic set bonus is applied from this section.\n" +
++            "Each key is a family name; value is the list of sparrowmc-item ids forming a complete set.\n" +
++            "Detection uses sparrowmc-item only — the secondary <set>_armor tag written by PluginCIT\n" +
++            "is intentionally ignored (it may be absent after a server restart).\n" +
++            "Leave empty if no explicit family-detection feature is needed.\n" +
++            "Example:\n" +
++            "  customArmorSets:\n" +
++            "    azurite: [azurite_helmet, azurite_chestplate, azurite_leggings, azurite_boots]")
++    public Map<String, List<String>> customArmorSets = new HashMap<>();
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/SparrowCombatConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/SparrowCombatConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..3db10b98f3c918d722b30ec5047f49367c1fe563
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/config/SparrowCombatConfig.java
+@@ -0,0 +1,90 @@
++package com.hpfxd.pandaspigot.config;
++
++import java.io.File;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.logging.Logger;
++import java.util.regex.Pattern;
++
++import org.spongepowered.configurate.CommentedConfigurationNode;
++import org.spongepowered.configurate.objectmapping.ConfigSerializable;
++import org.spongepowered.configurate.objectmapping.ObjectMapper;
++import org.spongepowered.configurate.objectmapping.meta.Comment;
++import org.spongepowered.configurate.util.MapFactories;
++import org.spongepowered.configurate.util.NamingSchemes;
++
++import com.google.common.base.Throwables;
++import com.hpfxd.configurate.eoyaml.EOYamlConfigurationLoader;
++
++/**
++ * SparrowMC combat configuration — loaded from sparrow-combat.yml.
++ *
++ * Covers: custom weapon damage bonuses keyed by sparrowmc-item NBT tag.
++ * All ids must be lowercase ASCII. Any non-conforming id is logged as a warning at load time.
++ */
++@ConfigSerializable
++@SuppressWarnings({"FieldCanBeLocal", "FieldMayBeFinal"})
++public class SparrowCombatConfig {
++
++    private static final Pattern VALID_ID = Pattern.compile("[a-z0-9_\\-]+");
++    private static final Logger LOGGER = Logger.getLogger("Minecraft");
++
++    private static SparrowCombatConfig config;
++
++    public static void init(File file) {
++        EOYamlConfigurationLoader loader = EOYamlConfigurationLoader.builder()
++                .file(file)
++                .defaultOptions(o -> o
++                        .header("SparrowMC combat configuration.\n" +
++                                "Additive damage bonuses for custom weapons identified by their sparrowmc-item NBT tag.\n" +
++                                "\n" +
++                                "Rules:\n" +
++                                "  - All ids must be lowercase ASCII: letters a-z, digits 0-9, underscores, hyphens.\n" +
++                                "  - Ids must match exactly the sparrowmc-item tag written by your plugin and the CIT pack.\n" +
++                                "  - Non-conforming ids are logged as warnings at startup and on reload.\n" +
++                                "  - Leave a section empty to preserve vanilla behavior on all items.")
++                        .mapFactory(MapFactories.insertionOrdered())
++                        .serializers(build -> build.registerAnnotatedObjects(ObjectMapper.factoryBuilder()
++                                .defaultNamingScheme(NamingSchemes.CAMEL_CASE)
++                                .build())))
++                .build();
++
++        try {
++            CommentedConfigurationNode root = loader.load();
++            config = root.get(SparrowCombatConfig.class);
++            root.set(config);
++            loader.save(root);
++            validateIds(config);
++        } catch (Exception e) {
++            throw Throwables.propagate(e);
++        }
++    }
++
++    private static void validateIds(SparrowCombatConfig cfg) {
++        if (cfg.customWeaponDamageBonus == null) return;
++        for (String id : cfg.customWeaponDamageBonus.keySet()) {
++            if (!VALID_ID.matcher(id).matches()) {
++                LOGGER.warning("[Sparrow] sparrow-combat.yml: invalid id '" + id
++                        + "' in customWeaponDamageBonus — ids must match [a-z0-9_\\-]+");
++            }
++        }
++    }
++
++    public static SparrowCombatConfig get() {
++        return config;
++    }
++
++    // ----------------------------------------------------------------------------
++
++    @Comment("Additive damage bonuses for custom weapons (sparrowmc-item NBT tag).\n" +
++            "Each key is a sparrowmc-item id, each value is the bonus in damage points\n" +
++            "(1 damage point = 0.5 hearts).\n" +
++            "The bonus is applied before the critical hit multiplier — a crit amplifies it.\n" +
++            "Leave empty to preserve vanilla damage on all items.\n" +
++            "Example:\n" +
++            "  customWeaponDamageBonus:\n" +
++            "    topaze_sword: 2.0\n" +
++            "    jaspe_sword: 3.0\n" +
++            "    saphir_sword: 4.0")
++    public Map<String, Double> customWeaponDamageBonus = new HashMap<>();
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/SparrowItemsConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/SparrowItemsConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..97f1e35dc264e889684333e51f7cc42b2ff7b63d
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/config/SparrowItemsConfig.java
+@@ -0,0 +1,113 @@
++package com.hpfxd.pandaspigot.config;
++
++import java.io.File;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.logging.Logger;
++import java.util.regex.Pattern;
++
++import org.spongepowered.configurate.CommentedConfigurationNode;
++import org.spongepowered.configurate.objectmapping.ConfigSerializable;
++import org.spongepowered.configurate.objectmapping.ObjectMapper;
++import org.spongepowered.configurate.objectmapping.meta.Comment;
++import org.spongepowered.configurate.util.MapFactories;
++import org.spongepowered.configurate.util.NamingSchemes;
++
++import com.google.common.base.Throwables;
++import com.hpfxd.configurate.eoyaml.EOYamlConfigurationLoader;
++
++/**
++ * SparrowMC items configuration — loaded from sparrow-items.yml.
++ *
++ * Covers: durability multipliers for custom non-armor items keyed by sparrowmc-item NBT tag.
++ * Scope: tools (pickaxe, axe, shovel, hoe), swords, bows, shears, flint-and-steel,
++ *        fishing rod, carrot-on-a-stick.
++ * Armor durability is configured separately in sparrow-armor.yml.
++ *
++ * All ids must be lowercase ASCII. Any non-conforming id is logged as a warning at load time.
++ */
++@ConfigSerializable
++@SuppressWarnings({"FieldCanBeLocal", "FieldMayBeFinal"})
++public class SparrowItemsConfig {
++
++    private static final Pattern VALID_ID = Pattern.compile("[a-z0-9_\\-]+");
++    private static final Logger LOGGER = Logger.getLogger("Minecraft");
++
++    private static SparrowItemsConfig config;
++
++    public static void init(File file) {
++        EOYamlConfigurationLoader loader = EOYamlConfigurationLoader.builder()
++                .file(file)
++                .defaultOptions(o -> o
++                        .header("SparrowMC items configuration.\n" +
++                                "Durability multipliers for custom non-armor items (sparrowmc-item NBT tag).\n" +
++                                "\n" +
++                                "Scope: tools (pickaxe, axe, shovel, hoe), swords, bows, shears,\n" +
++                                "flint-and-steel, fishing rod, carrot-on-a-stick.\n" +
++                                "Armor durability is configured separately in sparrow-armor.yml.\n" +
++                                "\n" +
++                                "Multiplier scale:\n" +
++                                "  1.0 = vanilla behavior (no change)\n" +
++                                "  0.5 = item lasts ~2x longer (50%% probabilistic skip per use)\n" +
++                                "  0.0 = indestructible (all durability damage is skipped)\n" +
++                                "  2.0 = item wears twice as fast\n" +
++                                "\n" +
++                                "Rules:\n" +
++                                "  - All ids must be lowercase ASCII: letters a-z, digits 0-9, underscores, hyphens.\n" +
++                                "  - Ids must match exactly the sparrowmc-item tag written by your plugin and the CIT pack.\n" +
++                                "  - If the id in config, NBT, and CIT pack do not match exactly, the item is treated\n" +
++                                "    as vanilla — no multiplier is applied and no error is thrown at runtime.\n" +
++                                "  - Non-conforming ids detected at load time are logged as warnings.\n" +
++                                "  - Leave a section empty to preserve vanilla behavior on all items.")
++                        .mapFactory(MapFactories.insertionOrdered())
++                        .serializers(build -> build.registerAnnotatedObjects(ObjectMapper.factoryBuilder()
++                                .defaultNamingScheme(NamingSchemes.CAMEL_CASE)
++                                .build())))
++                .build();
++
++        try {
++            CommentedConfigurationNode root = loader.load();
++            config = root.get(SparrowItemsConfig.class);
++            root.set(config);
++            loader.save(root);
++            validateIds(config);
++        } catch (Exception e) {
++            throw Throwables.propagate(e);
++        }
++    }
++
++    private static void validateIds(SparrowItemsConfig cfg) {
++        if (cfg.customItemDurabilityMultiplier == null) return;
++        for (String id : cfg.customItemDurabilityMultiplier.keySet()) {
++            if (!VALID_ID.matcher(id).matches()) {
++                LOGGER.warning("[Sparrow] sparrow-items.yml: invalid id '" + id
++                        + "' in customItemDurabilityMultiplier — ids must match [a-z0-9_\\-]+");
++            }
++        }
++    }
++
++    public static SparrowItemsConfig get() {
++        return config;
++    }
++
++    // ----------------------------------------------------------------------------
++
++    @Comment("Durability cost multipliers for custom non-armor items (sparrowmc-item NBT tag).\n" +
++            "Scope: tools, swords, bows, shears, flint-and-steel, fishing rod, carrot-on-a-stick.\n" +
++            "Armor durability is configured separately in sparrow-armor.yml.\n" +
++            "  1.0 = vanilla behavior\n" +
++            "  0.5 = item lasts ~2x longer (50%% probabilistic skip per durability event)\n" +
++            "  0.0 = indestructible\n" +
++            "  2.0 = item wears twice as fast\n" +
++            "Probabilistic skip for values below 1.0: Unbreaking and PlayerItemDamageEvent are\n" +
++            "not triggered for skipped durability calls.\n" +
++            "Leave empty to preserve vanilla durability on all items.\n" +
++            "Example:\n" +
++            "  customItemDurabilityMultiplier:\n" +
++            "    topaze_sword: 0.90\n" +
++            "    jaspe_sword: 0.85\n" +
++            "    saphir_sword: 0.80\n" +
++            "    pioche_topaze: 0.70\n" +
++            "    pioche_azurite: 0.60")
++    public Map<String, Double> customItemDurabilityMultiplier = new HashMap<>();
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/SparrowMiningConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/SparrowMiningConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..64f96995717e8814e0904b9b786632c70f8fe7ed
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/config/SparrowMiningConfig.java
+@@ -0,0 +1,94 @@
++package com.hpfxd.pandaspigot.config;
++
++import java.io.File;
++import java.util.HashMap;
++import java.util.Map;
++import java.util.logging.Logger;
++import java.util.regex.Pattern;
++
++import org.spongepowered.configurate.CommentedConfigurationNode;
++import org.spongepowered.configurate.objectmapping.ConfigSerializable;
++import org.spongepowered.configurate.objectmapping.ObjectMapper;
++import org.spongepowered.configurate.objectmapping.meta.Comment;
++import org.spongepowered.configurate.util.MapFactories;
++import org.spongepowered.configurate.util.NamingSchemes;
++
++import com.google.common.base.Throwables;
++import com.hpfxd.configurate.eoyaml.EOYamlConfigurationLoader;
++
++/**
++ * SparrowMC mining configuration — loaded from sparrow-mining.yml.
++ *
++ * Covers: custom mining speed multipliers keyed by sparrowmc-item NBT tag.
++ * All ids must be lowercase ASCII. Any non-conforming id is logged as a warning at load time.
++ */
++@ConfigSerializable
++@SuppressWarnings({"FieldCanBeLocal", "FieldMayBeFinal"})
++public class SparrowMiningConfig {
++
++    private static final Pattern VALID_ID = Pattern.compile("[a-z0-9_\\-]+");
++    private static final Logger LOGGER = Logger.getLogger("Minecraft");
++
++    private static SparrowMiningConfig config;
++
++    public static void init(File file) {
++        EOYamlConfigurationLoader loader = EOYamlConfigurationLoader.builder()
++                .file(file)
++                .defaultOptions(o -> o
++                        .header("SparrowMC mining configuration.\n" +
++                                "Speed multipliers for custom tools identified by their sparrowmc-item NBT tag.\n" +
++                                "\n" +
++                                "Scale:\n" +
++                                "  1.0 = vanilla mining speed (no change)\n" +
++                                "  1.30 = 30%% faster than vanilla\n" +
++                                "  2.0  = twice as fast as vanilla\n" +
++                                "\n" +
++                                "Rules:\n" +
++                                "  - All ids must be lowercase ASCII: letters a-z, digits 0-9, underscores, hyphens.\n" +
++                                "  - Ids must match exactly the sparrowmc-item tag and the CIT pack.\n" +
++                                "  - Non-conforming ids are logged as warnings at startup and on reload.\n" +
++                                "  - Leave a section empty to preserve vanilla behavior on all tools.")
++                        .mapFactory(MapFactories.insertionOrdered())
++                        .serializers(build -> build.registerAnnotatedObjects(ObjectMapper.factoryBuilder()
++                                .defaultNamingScheme(NamingSchemes.CAMEL_CASE)
++                                .build())))
++                .build();
++
++        try {
++            CommentedConfigurationNode root = loader.load();
++            config = root.get(SparrowMiningConfig.class);
++            root.set(config);
++            loader.save(root);
++            validateIds(config);
++        } catch (Exception e) {
++            throw Throwables.propagate(e);
++        }
++    }
++
++    private static void validateIds(SparrowMiningConfig cfg) {
++        if (cfg.customMiningSpeedMultiplier == null) return;
++        for (String id : cfg.customMiningSpeedMultiplier.keySet()) {
++            if (!VALID_ID.matcher(id).matches()) {
++                LOGGER.warning("[Sparrow] sparrow-mining.yml: invalid id '" + id
++                        + "' in customMiningSpeedMultiplier — ids must match [a-z0-9_\\-]+");
++            }
++        }
++    }
++
++    public static SparrowMiningConfig get() {
++        return config;
++    }
++
++    // ----------------------------------------------------------------------------
++
++    @Comment("Mining speed multipliers for custom tools (sparrowmc-item NBT tag).\n" +
++            "Each key is a sparrowmc-item id, each value is a multiplier applied to every\n" +
++            "Block.getDamage() call during block break progress.\n" +
++            "  1.0 = vanilla speed, 1.30 = 30%% faster, 2.0 = twice as fast.\n" +
++            "Leave empty to preserve vanilla mining speed on all tools.\n" +
++            "Example:\n" +
++            "  customMiningSpeedMultiplier:\n" +
++            "    pioche_topaze: 1.30\n" +
++            "    pioche_azurite: 1.45")
++    public Map<String, Double> customMiningSpeedMultiplier = new HashMap<>();
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/SparrowArmorDurabilityRegistry.java b/src/main/java/com/hpfxd/pandaspigot/util/SparrowArmorDurabilityRegistry.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..438eee75fd9256ba4528f4aaeaaae79d0f80f5a4
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/util/SparrowArmorDurabilityRegistry.java
+@@ -0,0 +1,49 @@
++package com.hpfxd.pandaspigot.util;
++
++import com.hpfxd.pandaspigot.config.SparrowArmorConfig;
++
++import java.util.Map;
++
++/**
++ * Lookup helper for custom armor piece durability multipliers (sparrowmc-item NBT key).
++ *
++ * Values are read at call time from PandaSpigotConfig.customArmorDurabilityMultiplier.
++ * Returns 1.0 for null ids, unknown ids, or uninitialised config — vanilla behavior preserved.
++ *
++ * Applied in PlayerInventory.a(float) — the single point where all 4 player armor slots
++ * lose durability after taking damage. Mobs (EntityInsentient) have a no-op damageArmor()
++ * and are not affected.
++ *
++ * Multiplier semantics — applied to the vanilla per-piece durability cost (vanillaDamage = (int)(rawDamage/4),
++ * min 1), NOT to the raw float before the cast:
++ *   1.0 = vanilla behavior (damage = vanillaDamage, exact match)
++ *   0.5 = 50% probabilistic skip per call — armor lasts ~2x longer
++ *   0.0 = indestructible (all durability loss is skipped)
++ *   2.0 = damage = Math.max(1, round(vanillaDamage * 2.0)) — armor wears twice as fast
++ *
++ * For multipliers < 1.0, the probabilistic skip fires BEFORE ItemStack.damage():
++ *   - Unbreaking enchant (inside isDamaged) stacks multiplicatively if present.
++ *   - PlayerItemDamageEvent is NOT fired for skipped calls.
++ * Both behaviours are intentional and assumed for this phase.
++ *
++ * Scope: armor durability only. Protection (armor points) is handled in
++ * EntityLiving.applyArmorModifier() via SparrowArmorRegistry.
++ */
++public final class SparrowArmorDurabilityRegistry {
++
++    private SparrowArmorDurabilityRegistry() {}
++
++    /**
++     * Returns the durability multiplier for the given custom armor piece id.
++     * Returns 1.0f if the id is null, unknown, or the config section is empty — vanilla preserved.
++     */
++    public static float getDurabilityMultiplier(String sparrowId) {
++        if (sparrowId == null) { return 1.0f; }
++        SparrowArmorConfig cfg = SparrowArmorConfig.get();
++        if (cfg == null) { return 1.0f; }
++        Map<String, Double> multipliers = cfg.customArmorDurabilityMultiplier;
++        if (multipliers == null) { return 1.0f; }
++        Double m = multipliers.get(sparrowId);
++        return m != null ? m.floatValue() : 1.0f;
++    }
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/SparrowArmorRegistry.java b/src/main/java/com/hpfxd/pandaspigot/util/SparrowArmorRegistry.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..8ae67afff5bd85d02d47c956ec8d63266d6337a5
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/util/SparrowArmorRegistry.java
+@@ -0,0 +1,79 @@
++package com.hpfxd.pandaspigot.util;
++
++import com.hpfxd.pandaspigot.config.SparrowArmorConfig;
++import net.minecraft.server.ItemStack;
++
++import java.util.Map;
++
++/**
++ * Lookup helper for custom armor protection bonuses (sparrowmc-item NBT key).
++ *
++ * Values are read at call time from PandaSpigotConfig.customArmorProtection.
++ * Returns 0 for null ids, unknown ids, or uninitialised config — vanilla behavior preserved.
++ *
++ * Applied in EntityLiving.applyArmorModifier() as an additive bonus on top of the
++ * vanilla ItemArmor.c sum returned by EntityLiving.br().
++ *
++ * Scale: same as vanilla armor points (ItemArmor.c field).
++ *   Typical per-piece values: 1 (boots/helmet leather) to 8 (chestplate diamond).
++ *   Total vanilla cap: 20 (full diamond). Custom bonus adds on top — formula clamps to 0.
++ *
++ * Scope: armor slots only — the hand slot is never included.
++ *   EntityHuman   : getEquipment() returns inventory.armor[0..3] directly, no hand slot.
++ *   All other entities: getEquipment(int i) with i in [1..4] is used explicitly;
++ *     index 0 (the hand slot for EntityInsentient) is always skipped.
++ * This slice does NOT touch armor durability — that is a separate domain (PlayerInventory.a).
++ * It does NOT modify enchantment-based protection (applyMagicModifier) or absorption.
++ */
++public final class SparrowArmorRegistry {
++
++    private SparrowArmorRegistry() {}
++
++    /**
++     * Returns the additive protection bonus (in vanilla armor points) for the given
++     * custom armor piece id. Returns 0 if the id is null, unknown, or the config is empty.
++     */
++    public static int getProtectionBonus(String sparrowId) {
++        if (sparrowId == null) { return 0; }
++        SparrowArmorConfig cfg = SparrowArmorConfig.get();
++        if (cfg == null) { return 0; }
++        Map<String, Integer> bonuses = cfg.customArmorProtection;
++        if (bonuses == null) { return 0; }
++        Integer bonus = bonuses.get(sparrowId);
++        return bonus != null ? bonus : 0;
++    }
++
++    /**
++     * Returns the total custom protection bonus for all armor slots of the given entity.
++     *
++     * Slot mapping (hand slot is never included):
++     *   EntityHuman: getEquipment() returns inventory.armor[0..3] — all 4 entries are armor
++     *     slots (boots, leggings, chestplate, helmet). Iterated via the full array.
++     *
++     *   All other EntityLiving: getEquipment(int i) is used with i in [1..4].
++     *     For EntityInsentient, equipment[0] is the hand slot (bA()) — it is skipped.
++     *     For any other subclass, slots 1..4 are conservatively read (no assumptions).
++     *
++     * Slots with null or unknown sparrowmc-item ids contribute 0 — vanilla preserved.
++     */
++    public static int getTotalBonus(net.minecraft.server.EntityLiving entity) {
++        if (entity instanceof net.minecraft.server.EntityHuman) {
++            // EntityHuman.getEquipment() returns inventory.armor only — no hand slot.
++            ItemStack[] equipment = entity.getEquipment();
++            if (equipment == null) { return 0; }
++            int total = 0;
++            for (ItemStack slot : equipment) {
++                total += getProtectionBonus(SparrowItem.getCustomId(slot));
++            }
++            return total;
++        } else {
++            // EntityInsentient (and any other EntityLiving): equipment[0] is the hand slot.
++            // Read only indices 1..4 (armor slots) via getEquipment(int).
++            int total = 0;
++            for (int i = 1; i <= 4; i++) {
++                total += getProtectionBonus(SparrowItem.getCustomId(entity.getEquipment(i)));
++            }
++            return total;
++        }
++    }
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/SparrowArmorSetRegistry.java b/src/main/java/com/hpfxd/pandaspigot/util/SparrowArmorSetRegistry.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..04c5dac58333b7edd969740737608e5088eca709
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/util/SparrowArmorSetRegistry.java
+@@ -0,0 +1,109 @@
++package com.hpfxd.pandaspigot.util;
++
++import com.hpfxd.pandaspigot.config.SparrowArmorConfig;
++import net.minecraft.server.EntityHuman;
++import net.minecraft.server.ItemStack;
++
++import java.util.Collections;
++import java.util.HashSet;
++import java.util.LinkedHashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++
++/**
++ * Optional detection helper for custom armor families (sparrowmc-item NBT key).
++ *
++ * A set is "complete" when all piece ids listed in the config for that set name are
++ * present across the player's 4 armor slots (helmet, chestplate, leggings, boots).
++ *
++ * Set definitions are read from SparrowArmorConfig.customArmorSets:
++ *   customArmorSets:
++ *     azurite: [azurite_helmet, azurite_chestplate, azurite_leggings, azurite_boots]
++ *
++ * Detection relies exclusively on the sparrowmc-item tag, which is written at item
++ * creation time (/givecit) and is always present on valid CIT pieces.
++ * The secondary <set>_armor tag written by PluginCIT is intentionally NOT used here:
++ * it is applied lazily on equip events and may be absent after server restart or login.
++ *
++ * Scope: detection only. No effect, bonus, or gameplay config is applied here.
++ * Base armor gameplay remains piece-by-piece: protection and durability are configured
++ * directly on each armor item id, with no implicit full-set bonus.
++ * This helper exists only for explicit future features that may want to query whether
++ * a complete named family is worn.
++ *
++ * Slot source: EntityHuman.getEquipment() returns inventory.armor[0..3] directly —
++ * no hand slot is included. Same contract as SparrowArmorRegistry.getTotalBonus().
++ *
++ * Edge cases:
++ *   - Empty armor slot: SparrowItem.getCustomId(null) = null, not counted.
++ *   - Piece without sparrowmc-item tag: getCustomId returns null, not counted.
++ *   - A sparrowmc-item id can only belong to one set at a time (String is unique per item).
++ *   - Unknown set name (not in config): hasFullArmorSet returns false.
++ *   - Empty config section: both methods return false/empty.
++ *
++ * Evaluation cost: O(4 + 4 * |sets|) per call. Not invoked on a tick loop in this slice;
++ * callers are responsible for limiting invocation frequency.
++ */
++public final class SparrowArmorSetRegistry {
++
++    private SparrowArmorSetRegistry() {}
++
++    /**
++    * Returns true if the player is wearing all pieces of the named family.
++    * The family must be defined in customArmorSets config with exactly the ids worn.
++     * Returns false if the set is unknown, the config is empty, or any piece is missing.
++     */
++    public static boolean hasFullArmorSet(EntityHuman player, String setName) {
++        if (setName == null || setName.isEmpty()) { return false; }
++        SparrowArmorConfig cfg = SparrowArmorConfig.get();
++        if (cfg == null) { return false; }
++        Map<String, List<String>> sets = cfg.customArmorSets;
++        if (sets == null) { return false; }
++        List<String> required = sets.get(setName);
++        if (required == null || required.isEmpty()) { return false; }
++
++        ItemStack[] armor = player.getEquipment();
++        if (armor == null) { return false; }
++
++        // Collect sparrowmc-item ids worn across all armor slots.
++        Set<String> worn = new HashSet<>();
++        for (ItemStack slot : armor) {
++            String id = SparrowItem.getCustomId(slot);
++            if (id != null) { worn.add(id); }
++        }
++
++        return worn.containsAll(required);
++    }
++
++    /**
++    * Returns the names of all fully-equipped armor families for the given player.
++    * Returns an empty set when no family is complete or the config section is empty.
++     * Iteration order follows the insertion order of customArmorSets in the config.
++     */
++    public static Set<String> getActiveArmorSets(EntityHuman player) {
++        SparrowArmorConfig cfg = SparrowArmorConfig.get();
++        if (cfg == null) { return Collections.emptySet(); }
++        Map<String, List<String>> sets = cfg.customArmorSets;
++        if (sets == null || sets.isEmpty()) { return Collections.emptySet(); }
++
++        ItemStack[] armor = player.getEquipment();
++        if (armor == null) { return Collections.emptySet(); }
++
++        // Collect worn ids once, then check each set — O(4 + 4*|sets|).
++        Set<String> worn = new HashSet<>();
++        for (ItemStack slot : armor) {
++            String id = SparrowItem.getCustomId(slot);
++            if (id != null) { worn.add(id); }
++        }
++
++        Set<String> active = new LinkedHashSet<>();
++        for (Map.Entry<String, List<String>> entry : sets.entrySet()) {
++            List<String> required = entry.getValue();
++            if (required != null && !required.isEmpty() && worn.containsAll(required)) {
++                active.add(entry.getKey());
++            }
++        }
++        return active;
++    }
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/SparrowDurabilityRegistry.java b/src/main/java/com/hpfxd/pandaspigot/util/SparrowDurabilityRegistry.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..807cba846b860b7e5c54a269b3e94bdfab4fedb9
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/util/SparrowDurabilityRegistry.java
+@@ -0,0 +1,54 @@
++package com.hpfxd.pandaspigot.util;
++
++import java.util.Map;
++
++import com.hpfxd.pandaspigot.config.SparrowItemsConfig;
++
++/**
++ * Lookup helper for custom non-armor item durability multipliers (sparrowmc-item NBT key).
++ *
++ * Values are read at call time from PandaSpigotConfig.customItemDurabilityMultiplier.
++ * Returns 1.0 for null ids, unknown ids, or uninitialised config — vanilla behavior preserved.
++ *
++ * Applied in ItemStack.damage() — exclusively for non-armor items.
++ * The patch site guards with !(item instanceof ItemArmor). Armor durability is a separate
++ * domain (PlayerInventory.a(float), Thorns, etc.) handled in a future dedicated slice.
++ *
++ * Items in scope (non-exhaustive — everything damageable that is not ItemArmor):
++ *   tools (ItemTool subclasses: pickaxe, axe, shovel, hoe)
++ *   swords (ItemSword)
++ *   bows (ItemBow)
++ *   shears (ItemShears)
++ *   flint-and-steel (ItemFlintAndSteel)
++ *   fishing rod (ItemFishingRod)
++ *   carrot-on-a-stick (ItemCarrotStick)
++ *
++ * Multiplier semantics:
++ *   1.0 = vanilla (no change)
++ *   0.5 = 50% probabilistic skip per call → item lasts ~2x longer
++ *   0.0 = indestructible (all damage calls are skipped)
++ *   2.0 = damage amount doubled → item wears twice as fast
++ *
++ * For multipliers < 1.0, the probabilistic skip fires BEFORE isDamaged():
++ *   - Unbreaking stacks multiplicatively with this multiplier if both are present.
++ *   - PlayerItemDamageEvent is NOT fired for skipped calls.
++ * Both behaviours are intentional and assumed for this phase.
++ */
++public final class SparrowDurabilityRegistry {
++
++    private SparrowDurabilityRegistry() {}
++
++    /**
++     * Returns the durability multiplier for the given custom non-armor item id.
++     * Returns 1.0f if the id is null, unknown, or the config section is empty — vanilla preserved.
++     */
++    public static float getDurabilityMultiplier(String sparrowId) {
++        if (sparrowId == null) { return 1.0f; }
++        SparrowItemsConfig cfg = SparrowItemsConfig.get();
++        if (cfg == null) { return 1.0f; }
++        Map<String, Double> multipliers = cfg.customItemDurabilityMultiplier;
++        if (multipliers == null) { return 1.0f; }
++        Double m = multipliers.get(sparrowId);
++        return m != null ? m.floatValue() : 1.0f;
++    }
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/SparrowItem.java b/src/main/java/com/hpfxd/pandaspigot/util/SparrowItem.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..1d717ffdc35b75af0c50cbb4d5ebc54860c1e157
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/util/SparrowItem.java
+@@ -0,0 +1,46 @@
++package com.hpfxd.pandaspigot.util;
++
++import net.minecraft.server.ItemStack;
++import net.minecraft.server.NBTTagCompound;
++
++/**
++ * Central utility for reading the custom item identity via the NBT tag sparrowmc-item.
++ * Single entry point for all future NMS patches that need this read.
++ *
++ * NBT contract:
++ *   - key  : sparrowmc-item
++ *   - type : String (NBT type 8)
++ *   - location : root compound of the ItemStack (item.getTag())
++ *   - source of truth : PluginCIT (me.krunsh.customcit.CustomCIT)
++ */
++public final class SparrowItem {
++
++    public static final String CUSTOM_ID_KEY = "sparrowmc-item";
++
++    private SparrowItem() {}
++
++    /**
++     * Returns the custom id of the item, or null if the item is null, has no NBT tag,
++     * the key is missing, or the value is empty.
++     * No normalization is applied — the id is returned exactly as stored in NBT.
++     * Never throws.
++     */
++    public static String getCustomId(ItemStack item) {
++        if (item == null || !item.hasTag()) {
++            return null;
++        }
++        NBTTagCompound tag = item.getTag();
++        if (!tag.hasKeyOfType(CUSTOM_ID_KEY, 8)) {
++            return null;
++        }
++        String id = tag.getString(CUSTOM_ID_KEY);
++        return id.isEmpty() ? null : id;
++    }
++
++    /**
++     * Returns true if the item carries a non-blank custom id.
++     */
++    public static boolean hasCustomId(ItemStack item) {
++        return getCustomId(item) != null;
++    }
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/SparrowMiningRegistry.java b/src/main/java/com/hpfxd/pandaspigot/util/SparrowMiningRegistry.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..f075d4b783046c9cac88479e548d577f32bcb5d8
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/util/SparrowMiningRegistry.java
+@@ -0,0 +1,33 @@
++package com.hpfxd.pandaspigot.util;
++
++import java.util.Map;
++
++import com.hpfxd.pandaspigot.config.SparrowMiningConfig;
++
++/**
++ * Lookup helper for custom mining speed multipliers (sparrowmc-item NBT key).
++ *
++ * Values are read at call time from SparrowMiningConfig.customMiningSpeedMultiplier.
++ * Returns 1.0 for null ids, unknown ids, or uninitialised config — vanilla behavior preserved.
++ *
++ * Applied in PlayerInteractManager after every Block.getDamage() call.
++ * A multiplier of 2.0 means twice as fast; 1.0 is vanilla.
++ */
++public final class SparrowMiningRegistry {
++
++    private SparrowMiningRegistry() {}
++
++    /**
++     * Returns the mining speed multiplier for the given custom tool id.
++     * Returns 1.0f if the id is null, unknown, or the config section is empty — vanilla preserved.
++     */
++    public static float getSpeedMultiplier(String sparrowId) {
++        if (sparrowId == null) { return 1.0f; }
++        SparrowMiningConfig cfg = SparrowMiningConfig.get();
++        if (cfg == null) { return 1.0f; }
++        Map<String, Double> multipliers = cfg.customMiningSpeedMultiplier;
++        if (multipliers == null) { return 1.0f; }
++        Double m = multipliers.get(sparrowId);
++        return m != null ? m.floatValue() : 1.0f;
++    }
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/SparrowWeaponRegistry.java b/src/main/java/com/hpfxd/pandaspigot/util/SparrowWeaponRegistry.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5859e8bcef119b09a44d7771a38f77daaeb09801
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/util/SparrowWeaponRegistry.java
+@@ -0,0 +1,33 @@
++package com.hpfxd.pandaspigot.util;
++
++import java.util.Map;
++
++import com.hpfxd.pandaspigot.config.SparrowCombatConfig;
++
++/**
++ * Lookup helper for custom weapon damage bonuses (sparrowmc-item NBT key).
++ *
++ * Values are read at call time from SparrowCombatConfig.customWeaponDamageBonus.
++ * No local state — the config is the single source of truth.
++ *
++ * Returns 0.0 for null ids, unknown ids, or when the config is not yet
++ * initialised — vanilla behavior is preserved in all those cases.
++ */
++public final class SparrowWeaponRegistry {
++
++    private SparrowWeaponRegistry() {}
++
++    /**
++     * Returns the additive damage bonus for the given custom weapon id.
++     * Returns 0.0f if the id is null, unknown, or the config section is empty.
++     */
++    public static float getDamageBonus(String sparrowId) {
++        if (sparrowId == null) { return 0.0f; }
++        SparrowCombatConfig cfg = SparrowCombatConfig.get();
++        if (cfg == null) { return 0.0f; }
++        Map<String, Double> bonuses = cfg.customWeaponDamageBonus;
++        if (bonuses == null) { return 0.0f; }
++        Double bonus = bonuses.get(sparrowId);
++        return bonus != null ? bonus.floatValue() : 0.0f;
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/DedicatedServer.java b/src/main/java/net/minecraft/server/DedicatedServer.java
+index 8a302b2678916f862cac0c020fa3247043204e6a..b3f0346c10a9c92171e1efd0d9303409d8802008 100644
+--- a/src/main/java/net/minecraft/server/DedicatedServer.java
++++ b/src/main/java/net/minecraft/server/DedicatedServer.java
+@@ -210,6 +210,12 @@ public class DedicatedServer extends MinecraftServer implements IMinecraftServer
+             bindAddress = new java.net.InetSocketAddress(inetaddress, this.R());
+             }
+             com.hpfxd.pandaspigot.config.PandaSpigotConfig.init((File) options.valueOf("pandaspigot-settings"));
++            // SparrowItem start - initialize Sparrow config files
++            com.hpfxd.pandaspigot.config.SparrowCombatConfig.init((File) options.valueOf("sparrow-combat"));
++            com.hpfxd.pandaspigot.config.SparrowMiningConfig.init((File) options.valueOf("sparrow-mining"));
++            com.hpfxd.pandaspigot.config.SparrowArmorConfig.init((File) options.valueOf("sparrow-armor"));
++            com.hpfxd.pandaspigot.config.SparrowItemsConfig.init((File) options.valueOf("sparrow-items"));
++            // SparrowItem end
+             // PandaSpigot end
+             // PaperSpigot start
+             org.github.paperspigot.PaperSpigotConfig.init((File) options.valueOf("paper-settings"));
+diff --git a/src/main/java/net/minecraft/server/EntityHuman.java b/src/main/java/net/minecraft/server/EntityHuman.java
+index 524ff60ada7392ec1fd803661f957c19c50b2c2e..9421d207496585a87ff7d5e03f97ea0ab79ccdcb 100644
+--- a/src/main/java/net/minecraft/server/EntityHuman.java
++++ b/src/main/java/net/minecraft/server/EntityHuman.java
+@@ -965,14 +965,22 @@ public abstract class EntityHuman extends EntityLiving {
+         if (playerAttackEntityEvent.callEvent() && willAttack) { // Logic moved to willAttack local variable.
+             {
+         // PandaSpigot end
++                // SparrowItem start - single weapon read, custom damage bonus before criticals
++                ItemStack weapon = this.bA();
++                String sparrowWeaponId = com.hpfxd.pandaspigot.util.SparrowItem.getCustomId(weapon);
++                // SparrowItem end
+                 float f = (float) this.getAttributeInstance(GenericAttributes.ATTACK_DAMAGE).getValue();
++                // SparrowItem start - additive custom weapon bonus applied before crit multiplier
++                f += com.hpfxd.pandaspigot.util.SparrowWeaponRegistry.getDamageBonus(sparrowWeaponId);
++                // If sparrowWeaponId is null or unknown, getDamageBonus returns 0.0 — vanilla behavior preserved.
++                // SparrowItem end
+                 byte b0 = 0;
+                 float f1 = 0.0F;
+ 
+                 if (entity instanceof EntityLiving) {
+-                    f1 = EnchantmentManager.a(this.bA(), ((EntityLiving) entity).getMonsterType());
++                    f1 = EnchantmentManager.a(weapon, ((EntityLiving) entity).getMonsterType());
+                 } else {
+-                    f1 = EnchantmentManager.a(this.bA(), EnumMonsterType.UNDEFINED);
++                    f1 = EnchantmentManager.a(weapon, EnumMonsterType.UNDEFINED);
+                 }
+ 
+                 int i = b0 + EnchantmentManager.a((EntityLiving) this);
+diff --git a/src/main/java/net/minecraft/server/EntityLiving.java b/src/main/java/net/minecraft/server/EntityLiving.java
+index 32752dfad24bc7883b1ab52e29834f1aa6fa60c6..e0808126225c3d90a62a7eb3f96e00665dc54ef9 100644
+--- a/src/main/java/net/minecraft/server/EntityLiving.java
++++ b/src/main/java/net/minecraft/server/EntityLiving.java
+@@ -998,6 +998,15 @@ public abstract class EntityLiving extends Entity {
+     protected float applyArmorModifier(DamageSource damagesource, float f) {
+         if (!damagesource.ignoresArmor()) {
+             int i = 25 - this.br();
++            // SparrowItem start - custom armor protection bonus (additive, on top of vanilla br())
++            // getTotalBonus() reads armor slots only:
++            //   EntityHuman  → inventory.armor[0..3] (no hand slot)
++            //   Other entities → getEquipment(1..4) (hand slot 0 excluded)
++            // Returns 0 when no custom armor is present — vanilla behavior preserved.
++            // Scope: protection only. Armor durability is handled in PlayerInventory.a(float).
++            int customBonus = com.hpfxd.pandaspigot.util.SparrowArmorRegistry.getTotalBonus(this);
++            i = Math.max(0, i - customBonus); // subtract bonus from damage multiplier; cap at 0
++            // SparrowItem end
+             float f1 = f * (float) i;
+ 
+             // this.damageArmor(f); // CraftBukkit - Moved into d(DamageSource, float)
+diff --git a/src/main/java/net/minecraft/server/ItemStack.java b/src/main/java/net/minecraft/server/ItemStack.java
+index 015ce283495dc57c8a9dc018ad36a04ebfd637d0..8e88ffe736d20cb44b1d71cc711192260c953be4 100644
+--- a/src/main/java/net/minecraft/server/ItemStack.java
++++ b/src/main/java/net/minecraft/server/ItemStack.java
+@@ -392,6 +392,31 @@ public final class ItemStack {
+     public void damage(int i, EntityLiving entityliving) {
+         if (!(entityliving instanceof EntityHuman) || !((EntityHuman) entityliving).abilities.canInstantlyBuild) {
+             if (this.e()) {
++                // SparrowItem start - custom non-armor item durability multiplier
++                // Scope: all damageable items except ItemArmor (armor is excluded by the guard below).
++                // In practice: tools, swords, bows, shears, flint-and-steel, fishing rod, carrot-stick.
++                // Config key: customItemDurabilityMultiplier in PandaSpigotConfig.
++                if (!(this.getItem() instanceof ItemArmor)) {
++                    String sparrowId = com.hpfxd.pandaspigot.util.SparrowItem.getCustomId(this);
++                    float durabilityMult = com.hpfxd.pandaspigot.util.SparrowDurabilityRegistry.getDurabilityMultiplier(sparrowId);
++                    if (durabilityMult != 1.0f) {
++                        if (durabilityMult <= 0.0f) { return; } // indestructible: skip all damage
++                        if (durabilityMult < 1.0f) {
++                            // Probabilistic skip: damage is cancelled with probability (1 - durabilityMult).
++                            // mult=0.5 → 50% of calls are skipped → item lasts ~2x longer.
++                            // Contract: this return fires BEFORE isDamaged(), which means:
++                            //   - Unbreaking enchantment (inside isDamaged) does NOT apply to skipped calls;
++                            //     if the item also has Unbreaking, both effects stack multiplicatively.
++                            //   - PlayerItemDamageEvent (Spigot, inside isDamaged) is NOT fired for
++                            //     skipped calls; plugins tracking per-use damage will undercount.
++                            // Both behaviours are intentional and assumed for this phase.
++                            if (entityliving.bc().nextFloat() >= durabilityMult) { return; }
++                        } else {
++                            i = Math.max(1, Math.round(i * durabilityMult));
++                        }
++                    }
++                }
++                // SparrowItem end
+                 if (this.isDamaged(i, entityliving.bc(), entityliving)) { // Spigot
+                     entityliving.b(this);
+                     --this.count;
+diff --git a/src/main/java/net/minecraft/server/PlayerInteractManager.java b/src/main/java/net/minecraft/server/PlayerInteractManager.java
+index 4a6b183900ff2b17084e45ac54b8b079ab8628cb..3bb2e1c0ad3cbd41ee5acbb04007a9ac9959547f 100644
+--- a/src/main/java/net/minecraft/server/PlayerInteractManager.java
++++ b/src/main/java/net/minecraft/server/PlayerInteractManager.java
+@@ -59,6 +59,9 @@ public class PlayerInteractManager {
+ 
+     public void a() {
+         this.currentTick = MinecraftServer.currentTick; // CraftBukkit;
++        // SparrowItem start - read tool id once per tick for custom mining speed
++        String sparrowToolId = com.hpfxd.pandaspigot.util.SparrowItem.getCustomId(this.player.bZ());
++        // SparrowItem end
+         float f;
+         int i;
+ 
+@@ -70,6 +73,7 @@ public class PlayerInteractManager {
+                 this.h = false;
+             } else {
+                 f = block.getDamage(this.player, this.player.world, this.i) * (float) (j + 1);
++                f *= com.hpfxd.pandaspigot.util.SparrowMiningRegistry.getSpeedMultiplier(sparrowToolId); // SparrowItem
+                 i = (int) (f * 10.0F);
+                 if (i != this.k) {
+                     this.world.c(this.player.getId(), this.i, i);
+@@ -92,6 +96,7 @@ public class PlayerInteractManager {
+                 int k = this.currentTick - this.lastDigTick;
+ 
+                 f = block1.getDamage(this.player, this.player.world, this.i) * (float) (k + 1);
++                f *= com.hpfxd.pandaspigot.util.SparrowMiningRegistry.getSpeedMultiplier(sparrowToolId); // SparrowItem
+                 i = (int) (f * 10.0F);
+                 if (i != this.k) {
+                     this.world.c(this.player.getId(), this.f, i);
+@@ -161,6 +166,8 @@ public class PlayerInteractManager {
+             } else if (block.getMaterial() != Material.AIR) {
+                 block.attack(this.world, blockposition, this.player);
+                 f = block.getDamage(this.player, this.player.world, blockposition);
++                f *= com.hpfxd.pandaspigot.util.SparrowMiningRegistry.getSpeedMultiplier( // SparrowItem start
++                    com.hpfxd.pandaspigot.util.SparrowItem.getCustomId(this.player.bZ())); // SparrowItem end
+                 // Allow fire punching to be blocked
+                 this.world.douseFire((EntityHuman) null, blockposition, enumdirection);
+             }
+@@ -208,6 +215,8 @@ public class PlayerInteractManager {
+ 
+             if (block.getMaterial() != Material.AIR) {
+                 float f = block.getDamage(this.player, this.player.world, blockposition) * (float) (i + 1);
++                f *= com.hpfxd.pandaspigot.util.SparrowMiningRegistry.getSpeedMultiplier( // SparrowItem start
++                    com.hpfxd.pandaspigot.util.SparrowItem.getCustomId(this.player.bZ())); // SparrowItem end
+ 
+                 if (f >= 0.7F) {
+                     this.d = false;
+diff --git a/src/main/java/net/minecraft/server/PlayerInventory.java b/src/main/java/net/minecraft/server/PlayerInventory.java
+index 76fa51d97e9a938d4198bbe657d77900f6327744..91b7968dbceacd7e0a2fc7f2a5cadbff11914686 100644
+--- a/src/main/java/net/minecraft/server/PlayerInventory.java
++++ b/src/main/java/net/minecraft/server/PlayerInventory.java
+@@ -482,10 +482,31 @@ public class PlayerInventory implements IInventory {
+         if (f < 1.0F) {
+             f = 1.0F;
+         }
++        // SparrowItem: compute vanilla per-piece cost once, after the f/=4 and the min-1 clamp.
++        // All custom multipliers are applied to this integer value, not to the raw float.
++        int vanillaDamage = (int) f;
+ 
+         for (int i = 0; i < this.armor.length; ++i) {
+             if (this.armor[i] != null && this.armor[i].getItem() instanceof ItemArmor) {
+-                this.armor[i].damage((int) f, this.player);
++                // SparrowItem start - custom armor durability multiplier
++                // The multiplier is applied to vanillaDamage (the vanilla per-piece integer cost).
++                // Unknown/null sparrowmc-item ids return mult=1.0 → damage=vanillaDamage → vanilla exact.
++                // Probabilistic skip (mult<1) fires before ItemStack.damage():
++                //   Unbreaking and PlayerItemDamageEvent are not triggered for skipped calls.
++                String sparrowId = com.hpfxd.pandaspigot.util.SparrowItem.getCustomId(this.armor[i]);
++                float mult = com.hpfxd.pandaspigot.util.SparrowArmorDurabilityRegistry.getDurabilityMultiplier(sparrowId);
++                if (mult <= 0.0f) { continue; } // indestructible: skip slot entirely
++                int damage;
++                if (mult < 1.0f) {
++                    if (this.player.bc().nextFloat() >= mult) { continue; } // probabilistic skip
++                    damage = vanillaDamage;
++                } else if (mult == 1.0f) {
++                    damage = vanillaDamage;
++                } else {
++                    damage = Math.max(1, Math.round(vanillaDamage * mult));
++                }
++                // SparrowItem end
++                this.armor[i].damage(damage, this.player);
+                 if (this.armor[i].count == 0) {
+                     this.armor[i] = null;
+                 }
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index 2eac381a825ed0edabd12816432f6d2d655887ef..f22942f29b7ecfc39456e203704d6a1491b784d8 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -749,6 +749,12 @@ public final class CraftServer implements Server {
+         org.spigotmc.SpigotConfig.init((File) console.options.valueOf("spigot-settings")); // Spigot
+         org.github.paperspigot.PaperSpigotConfig.init((File) console.options.valueOf("paper-settings")); // PaperSpigot
+         com.hpfxd.pandaspigot.config.PandaSpigotConfig.init((File) console.options.valueOf("pandaspigot-settings")); // PandaSpigot
++        // SparrowItem start - reload Sparrow config files
++        com.hpfxd.pandaspigot.config.SparrowCombatConfig.init((File) console.options.valueOf("sparrow-combat"));
++        com.hpfxd.pandaspigot.config.SparrowMiningConfig.init((File) console.options.valueOf("sparrow-mining"));
++        com.hpfxd.pandaspigot.config.SparrowArmorConfig.init((File) console.options.valueOf("sparrow-armor"));
++        com.hpfxd.pandaspigot.config.SparrowItemsConfig.init((File) console.options.valueOf("sparrow-items"));
++        // SparrowItem end
+         for (WorldServer world : console.worlds) {
+             world.worldData.setDifficulty(difficulty);
+             world.setSpawnFlags(monsters, animals);
+diff --git a/src/main/java/org/bukkit/craftbukkit/Main.java b/src/main/java/org/bukkit/craftbukkit/Main.java
+index d8d19207e4db256befa886bc9638759ed7c926dc..af8a59ba2dfd4c2e8ac4a99776d11ddd9df562c9 100644
+--- a/src/main/java/org/bukkit/craftbukkit/Main.java
++++ b/src/main/java/org/bukkit/craftbukkit/Main.java
+@@ -140,6 +140,32 @@ public class Main {
+                         .defaultsTo(new File("pandaspigot.yml"))
+                         .describedAs("Yml file");
+ 
++                // SparrowItem start - Sparrow config files
++                acceptsAll(asList("sparrow-combat"), "File for Sparrow combat settings")
++                        .withRequiredArg()
++                        .ofType(File.class)
++                        .defaultsTo(new File("sparrow-combat.yml"))
++                        .describedAs("Yml file");
++
++                acceptsAll(asList("sparrow-mining"), "File for Sparrow mining settings")
++                        .withRequiredArg()
++                        .ofType(File.class)
++                        .defaultsTo(new File("sparrow-mining.yml"))
++                        .describedAs("Yml file");
++
++                acceptsAll(asList("sparrow-armor"), "File for Sparrow armor settings")
++                        .withRequiredArg()
++                        .ofType(File.class)
++                        .defaultsTo(new File("sparrow-armor.yml"))
++                        .describedAs("Yml file");
++
++                acceptsAll(asList("sparrow-items"), "File for Sparrow items settings")
++                        .withRequiredArg()
++                        .ofType(File.class)
++                        .defaultsTo(new File("sparrow-items.yml"))
++                        .describedAs("Yml file");
++                // SparrowItem end
++
+                 acceptsAll(asList("add-plugin", "add-extra-plugin-jar"), "Specify paths to extra plugin jars to be loaded in addition to those in the plugins folder. This argument can be specified multiple times, once for each extra plugin jar path.")
+                     .withRequiredArg()
+                     .ofType(File.class)

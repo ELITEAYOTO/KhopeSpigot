@@ -9,5 +9,7 @@ run/
 # gradle
 .gradle/
 build/
+/build-logic/bin/
+/paperclip/bin/
 
 paperclip.jar
