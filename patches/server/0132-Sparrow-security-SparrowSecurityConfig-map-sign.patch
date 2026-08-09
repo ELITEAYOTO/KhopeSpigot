@@ -1,0 +1,237 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Tue, 28 Jul 2026 17:07:49 +0200
+Subject: [PATCH] Sparrow security: map and sign throttling configuration
+
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/SparrowSecurityConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/SparrowSecurityConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..6161b168c7a262be0f7f69e498a02e40e5eaa177
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/config/SparrowSecurityConfig.java
+@@ -0,0 +1,106 @@
++package com.hpfxd.pandaspigot.config;
++
++import java.io.File;
++import java.util.logging.Logger;
++
++import org.spongepowered.configurate.CommentedConfigurationNode;
++import org.spongepowered.configurate.objectmapping.ConfigSerializable;
++import org.spongepowered.configurate.objectmapping.ObjectMapper;
++import org.spongepowered.configurate.objectmapping.meta.Comment;
++import org.spongepowered.configurate.util.MapFactories;
++import org.spongepowered.configurate.util.NamingSchemes;
++
++import com.google.common.base.Throwables;
++import com.hpfxd.configurate.eoyaml.EOYamlConfigurationLoader;
++
++/**
++ * SparrowMC security configuration — loaded from sparrow-security.yml.
++ *
++ * Covers:
++ *   - Map: limiter le taux de rendu des cartes tenues en main (anti-lag).
++ *   - Sign: intervalle minimum entre deux mises a jour d'enseigne par joueur (anti-spam).
++ *
++ * Tous les defauts reproduisent le comportement vanilla/Spigot.
++ */
++@ConfigSerializable
++@SuppressWarnings({"FieldCanBeLocal", "FieldMayBeFinal"})
++public class SparrowSecurityConfig {
++
++    private static final Logger LOGGER = Logger.getLogger("Minecraft");
++    private static SparrowSecurityConfig config;
++
++    // --- Champs statiques caches pour la performance par tick ---
++
++    /** Intervalle en ticks entre deux rendus de carte tenue en main. 1 = vanilla. */
++    public static int mapUpdateInterval = 1;
++
++    /** Intervalle minimum en ticks entre deux mises a jour d'enseigne par joueur. 0 = desactive. */
++    public static int signUpdateIntervalTicks = 0;
++
++    // --- Initialisation ---
++
++    public static void init(File file) {
++        EOYamlConfigurationLoader loader = EOYamlConfigurationLoader.builder()
++                .file(file)
++                .defaultOptions(o -> o
++                        .header("SparrowMC security configuration.\n" +
++                                "Tous les defauts reproduisent le comportement vanilla/Spigot (safe a deployer tel quel).\n" +
++                                "\n" +
++                                "map:\n" +
++                                "  updateInterval — interval en ticks entre deux rendus de carte tenue en main.\n" +
++                                "                   1 = vanilla (rendu chaque tick).\n" +
++                                "                   4 = recommande (rendu toutes les 200 ms, imperceptible).\n" +
++                                "\n" +
++                                "sign:\n" +
++                                "  updateIntervalTicks — intervalle minimum en ticks entre deux PacketPlayInUpdateSign\n" +
++                                "                        envoyes par le meme joueur.\n" +
++                                "                        0 = desactive (comportement vanilla).\n" +
++                                "                        20 = une mise a jour par seconde maximum.\n" +
++                                "                        Recommande pour eviter le spam d'enseigne: 5.")
++                        .mapFactory(MapFactories.insertionOrdered())
++                        .serializers(build -> build.registerAnnotatedObjects(ObjectMapper.factoryBuilder()
++                                .defaultNamingScheme(NamingSchemes.CAMEL_CASE)
++                                .build())))
++                .build();
++
++        try {
++            CommentedConfigurationNode root = loader.load();
++            config = root.get(SparrowSecurityConfig.class);
++            root.set(config);
++            loader.save(root);
++            cacheFields(config);
++            LOGGER.info("[SparrowSecurity] Configuration chargee depuis " + file.getName() + ".");
++        } catch (Exception e) {
++            throw Throwables.propagate(e);
++        }
++    }
++
++    private static void cacheFields(SparrowSecurityConfig cfg) {
++        mapUpdateInterval       = Math.max(1, cfg.map.updateInterval);
++        signUpdateIntervalTicks = Math.max(0, cfg.sign.updateIntervalTicks);
++    }
++
++    // --- Structure de configuration ---
++
++    @Comment("Map rendering settings")
++    public MapConfig map = new MapConfig();
++
++    @Comment("Sign update settings")
++    public SignConfig sign = new SignConfig();
++
++    // --- Classes internes ---
++
++    @ConfigSerializable
++    public static class MapConfig {
++        @Comment("Intervalle en ticks entre deux rendus de carte tenue en main.\n" +
++                 "1 = vanilla. 4 = recommande (reduit la charge CPU sans impact visuel).")
++        public int updateInterval = 1;
++    }
++
++    @ConfigSerializable
++    public static class SignConfig {
++        @Comment("Intervalle minimum en ticks entre deux paquets de mise a jour d'enseigne par joueur.\n" +
++                 "0 = desactive (vanilla). 5 = recommande. 20 = une mise a jour par seconde max.")
++        public int updateIntervalTicks = 0;
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/DedicatedServer.java b/src/main/java/net/minecraft/server/DedicatedServer.java
+index d66ced7c0a50a4533a27554b85492f60d4a00aa7..2753154ed9a0f12a624df58a0023f1fdc58a4c24 100644
+--- a/src/main/java/net/minecraft/server/DedicatedServer.java
++++ b/src/main/java/net/minecraft/server/DedicatedServer.java
+@@ -1,10 +1,7 @@
+ package net.minecraft.server;
+ 
+-import com.google.common.collect.Lists;
+-import java.io.BufferedReader;
+ import java.io.File;
+ import java.io.IOException;
+-import java.io.InputStreamReader;
+ import java.net.InetAddress;
+ import java.net.Proxy;
+ import java.util.Collections;
+@@ -12,18 +9,17 @@ import java.util.List;
+ import java.util.Random;
+ import java.util.concurrent.Callable;
+ import java.util.concurrent.TimeUnit;
++
++import org.apache.logging.log4j.Level;
+ import org.apache.logging.log4j.LogManager;
+ import org.apache.logging.log4j.Logger;
++import org.bukkit.craftbukkit.util.Waitable;
++import org.bukkit.event.server.RemoteServerCommandEvent;
++import org.bukkit.event.server.ServerCommandEvent;
+ 
+-// CraftBukkit start
+-import java.io.PrintStream;
+-import org.apache.logging.log4j.Level;
++import com.google.common.collect.Lists;
+ 
+-//import org.bukkit.craftbukkit.LoggerOutputStream; // PandaSpigot - Use Log4j IOStreams
+ import co.aikar.timings.SpigotTimings; // Spigot
+-import org.bukkit.event.server.ServerCommandEvent;
+-import org.bukkit.craftbukkit.util.Waitable;
+-import org.bukkit.event.server.RemoteServerCommandEvent;
+ // CraftBukkit end
+ 
+ public class DedicatedServer extends MinecraftServer implements IMinecraftServer {
+@@ -217,6 +213,7 @@ public class DedicatedServer extends MinecraftServer implements IMinecraftServer
+             com.hpfxd.pandaspigot.config.SparrowItemsConfig.init((File) options.valueOf("sparrow-items"));
+             com.hpfxd.pandaspigot.config.SparrowCropsConfig.init((File) options.valueOf("sparrow-crops"));
+             com.hpfxd.pandaspigot.config.SparrowPerfConfig.init((File) options.valueOf("sparrow-perf"));
++            com.hpfxd.pandaspigot.config.SparrowSecurityConfig.init((File) options.valueOf("sparrow-security"));
+             // SparrowItem end
+             // PandaSpigot end
+             // PaperSpigot start
+diff --git a/src/main/java/net/minecraft/server/ItemWorldMap.java b/src/main/java/net/minecraft/server/ItemWorldMap.java
+index 6473ee5b795253994cd482f1c0caea1e83ff985c..2c982ae55543610f68af709adc5f7cfe5bfb7d7b 100644
+--- a/src/main/java/net/minecraft/server/ItemWorldMap.java
++++ b/src/main/java/net/minecraft/server/ItemWorldMap.java
+@@ -178,9 +178,14 @@ public class ItemWorldMap extends ItemWorldMapBase {
+                 worldmap.a(entityhuman, itemstack);
+             }
+ 
++            // SparrowSecurity start - limiter le taux de rendu des cartes tenues en main
+             if (flag) {
+-                this.a(world, entity, worldmap);
++                int interval = com.hpfxd.pandaspigot.config.SparrowSecurityConfig.mapUpdateInterval;
++                if (interval <= 1 || (entity.ticksLived % interval == 0)) {
++                    this.a(world, entity, worldmap);
++                }
+             }
++            // SparrowSecurity end
+ 
+         }
+     }
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index a4c9ee61ca31700b35250cb014f31ffc413cbf8c..a75f82ea4848d6c086320c2fe652d5c24bb37a7d 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -113,6 +113,7 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     private int lastTick = MinecraftServer.currentTick;
+     private int lastDropTick = MinecraftServer.currentTick;
+     private int lastBookTick = MinecraftServer.currentTick; // PandaSpigot
++    private int lastSignTick = 0; // SparrowSecurity
+     private int dropCount = 0;
+     private static final int SURVIVAL_PLACE_DISTANCE_SQUARED = 6 * 6;
+     private static final int CREATIVE_PLACE_DISTANCE_SQUARED = 7 * 7;
+@@ -1901,6 +1902,13 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     public void a(PacketPlayInUpdateSign packetplayinupdatesign) {
+         if (this.player.dead) return; // CraftBukkit
+         PlayerConnectionUtils.ensureMainThread(packetplayinupdatesign, this, this.player.u());
++        // SparrowSecurity start - limiter le taux de mise a jour d'enseigne
++        int signInterval = com.hpfxd.pandaspigot.config.SparrowSecurityConfig.signUpdateIntervalTicks;
++        if (signInterval > 0 && MinecraftServer.currentTick - this.lastSignTick < signInterval) {
++            return;
++        }
++        this.lastSignTick = MinecraftServer.currentTick;
++        // SparrowSecurity end
+         this.player.resetIdleTimer();
+         WorldServer worldserver = this.minecraftServer.getWorldServer(this.player.dimension);
+         BlockPosition blockposition = packetplayinupdatesign.a();
+diff --git a/src/main/java/org/bukkit/craftbukkit/Main.java b/src/main/java/org/bukkit/craftbukkit/Main.java
+index 6c0636cec8dd2442152f26a725c033cd9126716d..e21408347af085896c96340833d04f64684298be 100644
+--- a/src/main/java/org/bukkit/craftbukkit/Main.java
++++ b/src/main/java/org/bukkit/craftbukkit/Main.java
+@@ -7,6 +7,7 @@ import java.util.Arrays;
+ import java.util.List;
+ import java.util.logging.Level;
+ import java.util.logging.Logger;
++
+ import joptsimple.OptionParser;
+ import joptsimple.OptionSet;
+ import net.minecraft.server.MinecraftServer;
+@@ -176,6 +177,12 @@ public class Main {
+                         .ofType(File.class)
+                         .defaultsTo(new File("sparrow-perf.yml"))
+                         .describedAs("Yml file");
++
++                acceptsAll(asList("sparrow-security"), "File for Sparrow security settings")
++                        .withRequiredArg()
++                        .ofType(File.class)
++                        .defaultsTo(new File("sparrow-security.yml"))
++                        .describedAs("Yml file");
+                 // SparrowItem end
+ 
+                 acceptsAll(asList("add-plugin", "add-extra-plugin-jar"), "Specify paths to extra plugin jars to be loaded in addition to those in the plugins folder. This argument can be specified multiple times, once for each extra plugin jar path.")

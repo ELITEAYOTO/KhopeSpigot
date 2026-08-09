@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KHopeSpigot <fork@localhost>
+Date: Mon, 20 Jul 2026 19:10:00 +0200
+Subject: [PATCH] KHopeSpigot: add isolated unknown crafting event
+
+Expose unresolved player crafting matrices without changing the semantics of
+PrepareItemCraftEvent and without registering placeholder recipes globally.
+The optional trace id correlates targeted plugin and server diagnostics.
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/event/inventory/PrepareUnknownCraftEvent.java b/src/main/java/com/hpfxd/pandaspigot/event/inventory/PrepareUnknownCraftEvent.java
+new file mode 100644
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/event/inventory/PrepareUnknownCraftEvent.java
+@@ -0,0 +1,64 @@
++package com.hpfxd.pandaspigot.event.inventory;
++
++import org.bukkit.event.HandlerList;
++import org.bukkit.event.inventory.InventoryEvent;
++import org.bukkit.inventory.CraftingInventory;
++import org.bukkit.inventory.InventoryView;
++
++/**
++ * Fired when the vanilla crafting manager cannot resolve a crafting matrix.
++ *
++ * <p>This event is deliberately separate from PrepareItemCraftEvent: existing
++ * plugins can continue to assume that its recipe is non-null. A custom
++ * crafting plugin may inspect the matrix and set a result on the returned
++ * inventory. The server does not register a global recipe and
++ * {@link CraftingInventory#getRecipe()} remains {@code null}.</p>
++ *
++ * <p>Plugins that provide a result must own the result-slot transaction and
++ * cancel its InventoryClickEvent. Letting the vanilla result slot process an
++ * unknown recipe is not supported.</p>
++ */
++public final class PrepareUnknownCraftEvent extends InventoryEvent {
++    private static final HandlerList handlers = new HandlerList();
++    private final CraftingInventory matrix;
++    private final long traceId;
++
++    public PrepareUnknownCraftEvent(CraftingInventory matrix, InventoryView view) {
++        this(matrix, view, 0L);
++    }
++
++    public PrepareUnknownCraftEvent(CraftingInventory matrix, InventoryView view, long traceId) {
++        super(view);
++        this.matrix = matrix;
++        this.traceId = traceId;
++    }
++
++    /**
++     * Gets the unresolved crafting inventory. Its recipe is always null when
++     * the event is created.
++     *
++     * @return unresolved crafting inventory
++     */
++    @Override
++    public CraftingInventory getInventory() {
++        return this.matrix;
++    }
++
++    /**
++     * Gets the optional server-side diagnostic correlation id.
++     *
++     * @return correlation id, or zero when tracing is disabled
++     */
++    public long getTraceId() {
++        return this.traceId;
++    }
++
++    @Override
++    public HandlerList getHandlers() {
++        return handlers;
++    }
++
++    public static HandlerList getHandlerList() {
++        return handlers;
++    }
++}
+

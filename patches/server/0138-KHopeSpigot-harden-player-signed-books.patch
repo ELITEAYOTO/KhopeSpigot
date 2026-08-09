@@ -1,0 +1,209 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KHopeSpigot <noreply@localhost>
+Date: Tue, 28 Jul 2026 11:18:00 +0200
+Subject: [PATCH] KHopeSpigot: harden player-signed books
+
+Limit incoming books to the vanilla fifty-page ceiling and strip interactive
+JSON from pages signed by players. Preserve the complete visible text, reject
+excessive JSON nesting before Gson parsing, and keep the behavior configurable
+per world.
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+@@ -62,4 +62,8 @@ public class PandaSpigotWorldConfig {
+     @Comment("This option controls whether or not there is a chance for arrow crits to deal extra damage.\n" +
+             "By default, this is true (vanilla behaviour)")
+     public boolean randomArrowDamage = true;
++
++    @Comment("Strip interactive JSON components from player-signed book pages while preserving their visible text.\n" +
++            "This prevents modded clients from embedding clickEvent commands in books.")
++    public boolean fixBookHack = true;
+ }
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -68,6 +68,8 @@ import org.github.paperspigot.PaperSpigotConfig; // PaperSpigot
+ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerListBox {
+ 
+     private static final Logger c = LogManager.getLogger();
++    private static final int MAX_BOOK_PAGES = 50;
++    private static final int MAX_SIGNED_BOOK_JSON_DEPTH = 64;
+     // PandaSpigot start - Smooth teleportation
+     private static final Set<PacketPlayOutPosition.EnumPlayerTeleportFlags> TELEPORT_NO_ROT =
+             com.google.common.collect.Sets.immutableEnumSet(
+@@ -2162,6 +2164,12 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+     // PandaSpigot start
+     private boolean validateBook(ItemStack testStack) {
+         NBTTagList pageList = testStack.getTag().getList("pages", 8);
++        if (!hasAllowedBookPageCount(pageList)) {
++            PlayerConnection.c.warn(this.player.getName() + " tried to send a book with too many pages. Pages: "
++                    + pageList.size() + " - Allowed: " + MAX_BOOK_PAGES);
++            minecraftServer.postToMainThread(() -> this.disconnect("Book has too many pages!"));
++            return false;
++        }
+         long byteTotal = 0;
+         int maxBookPageSize = com.hpfxd.pandaspigot.config.PandaSpigotConfig.get().maxBookPageSize;
+         double multiplier = Math.max(0.3D, Math.min(1D, com.hpfxd.pandaspigot.config.PandaSpigotConfig.get().maxBookTotalSizeMultiplier));
+@@ -2196,6 +2204,73 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+         return true;
+     }
++
++    static boolean hasAllowedBookPageCount(NBTTagList pages) {
++        return pages != null && pages.size() <= MAX_BOOK_PAGES;
++    }
++
++    static NBTTagList sanitizeSignedBookPages(NBTTagList pages) throws IOException {
++        if (!hasAllowedBookPageCount(pages)) {
++            throw new IOException("Signed book has too many pages");
++        }
++
++        NBTTagList sanitized = new NBTTagList();
++        for (int i = 0; i < pages.size(); ++i) {
++            String page = pages.getString(i);
++            if (!hasSafeJsonNesting(page, MAX_SIGNED_BOOK_JSON_DEPTH)) {
++                throw new IOException("Signed book page contains invalid or excessively nested JSON");
++            }
++
++            try {
++                IChatBaseComponent component = IChatBaseComponent.ChatSerializer.a(page);
++                if (component == null) {
++                    throw new IOException("Signed book page has no JSON component");
++                }
++                String plainTextJson = IChatBaseComponent.ChatSerializer.a(
++                        new ChatComponentText(component.c()));
++                sanitized.add(new NBTTagString(plainTextJson));
++            } catch (RuntimeException exception) {
++                throw new IOException("Signed book page contains invalid JSON", exception);
++            }
++        }
++        return sanitized;
++    }
++
++    static boolean hasSafeJsonNesting(String json, int maximumDepth) {
++        if (json == null || maximumDepth < 1) {
++            return false;
++        }
++
++        int depth = 0;
++        boolean quoted = false;
++        boolean escaped = false;
++        for (int i = 0; i < json.length(); ++i) {
++            char character = json.charAt(i);
++            if (quoted) {
++                if (escaped) {
++                    escaped = false;
++                } else if (character == '\\') {
++                    escaped = true;
++                } else if (character == '"') {
++                    quoted = false;
++                }
++                continue;
++            }
++
++            if (character == '"') {
++                quoted = true;
++            } else if (character == '{' || character == '[') {
++                if (++depth > maximumDepth) {
++                    return false;
++                }
++            } else if (character == '}' || character == ']') {
++                if (--depth < 0) {
++                    return false;
++                }
++            }
++        }
++        return !quoted && depth == 0;
++    }
+     // PandaSpigot end
+ 
+     public void a(PacketPlayInCustomPayload packetplayincustompayload) {
+@@ -2272,7 +2347,11 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                         itemstack1 = new ItemStack(Items.WRITTEN_BOOK);
+                         itemstack1.a("author", (NBTBase) (new NBTTagString(this.player.getName())));
+                         itemstack1.a("title", (NBTBase) (new NBTTagString(itemstack.getTag().getString("title"))));
+-                        itemstack1.a("pages", (NBTBase) itemstack.getTag().getList("pages", 8));
++                        NBTTagList pages = itemstack.getTag().getList("pages", 8);
++                        if (player.world.pandaSpigotConfig.fixBookHack) {
++                            pages = sanitizeSignedBookPages(pages);
++                        }
++                        itemstack1.a("pages", (NBTBase) pages);
+                         itemstack1.setItem(Items.WRITTEN_BOOK);
+                         CraftEventFactory.handleEditBookEvent(player, itemstack1);
+                         // CraftBukkit end
+diff --git a/src/test/java/net/minecraft/server/PlayerConnectionBookSecurityTest.java b/src/test/java/net/minecraft/server/PlayerConnectionBookSecurityTest.java
+new file mode 100644
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/PlayerConnectionBookSecurityTest.java
+@@ -0,0 +1,71 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.io.IOException;
++
++import org.junit.Test;
++
++public class PlayerConnectionBookSecurityTest {
++
++    @Test
++    public void acceptsAtMostFiftyPages() {
++        NBTTagList pages = pages(50, "{\"text\":\"page\"}");
++
++        assertTrue(PlayerConnection.hasAllowedBookPageCount(pages));
++        pages.add(new NBTTagString("{\"text\":\"overflow\"}"));
++        assertFalse(PlayerConnection.hasAllowedBookPageCount(pages));
++    }
++
++    @Test
++    public void signedBookSanitizerPreservesVisibleTextAndRemovesActions() throws Exception {
++        NBTTagList pages = pages(1,
++                "{\"text\":\"Clique\",\"clickEvent\":{\"action\":\"run_command\",\"value\":\"/op attacker\"},"
++                        + "\"extra\":[{\"text\":\" ici\",\"hoverEvent\":{\"action\":\"show_text\","
++                        + "\"value\":\"secret\"}}]}");
++
++        NBTTagList sanitized = PlayerConnection.sanitizeSignedBookPages(pages);
++        String sanitizedJson = sanitized.getString(0);
++        IChatBaseComponent component = IChatBaseComponent.ChatSerializer.a(sanitizedJson);
++
++        assertEquals("Clique ici", component.c());
++        assertFalse(sanitizedJson.contains("clickEvent"));
++        assertFalse(sanitizedJson.contains("hoverEvent"));
++        assertFalse(sanitizedJson.contains("/op attacker"));
++    }
++
++    @Test
++    public void jsonDepthScannerIgnoresBracketsInsideStrings() {
++        assertTrue(PlayerConnection.hasSafeJsonNesting(
++                "{\"text\":\"[still text] {not structure}\"}", 2));
++    }
++
++    @Test
++    public void rejectsExcessivelyNestedSignedBookJsonBeforeParsing() {
++        StringBuilder nested = new StringBuilder();
++        for (int i = 0; i < 65; ++i) {
++            nested.append('[');
++        }
++        for (int i = 0; i < 65; ++i) {
++            nested.append(']');
++        }
++
++        assertFalse(PlayerConnection.hasSafeJsonNesting(nested.toString(), 64));
++    }
++
++    @Test(expected = IOException.class)
++    public void rejectsMoreThanFiftySignedPages() throws Exception {
++        PlayerConnection.sanitizeSignedBookPages(
++                pages(51, "{\"text\":\"page\"}"));
++    }
++
++    private static NBTTagList pages(int count, String contents) {
++        NBTTagList pages = new NBTTagList();
++        for (int i = 0; i < count; ++i) {
++            pages.add(new NBTTagString(contents));
++        }
++        return pages;
++    }
++}

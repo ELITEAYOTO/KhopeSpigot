@@ -1,0 +1,243 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KHopeSpigot <noreply@localhost>
+Date: Tue, 28 Jul 2026 13:31:00 +0200
+Subject: [PATCH] KHopeSpigot: configurable player command allowlist
+
+Hide every root command from non-bypass players by default and expose only
+labels explicitly listed in spigot.yml. Keep command execution permission
+handling unchanged, retain argument completion for visible commands and let
+pandaspigot.command-enumeration.bypass preserve the complete diagnostic view.
+
+diff --git a/src/main/java/org/spigotmc/SpigotConfig.java b/src/main/java/org/spigotmc/SpigotConfig.java
+--- a/src/main/java/org/spigotmc/SpigotConfig.java
++++ b/src/main/java/org/spigotmc/SpigotConfig.java
+@@ -7,9 +7,12 @@ import java.lang.reflect.InvocationTargetException;
+ import java.lang.reflect.Method;
+ import java.lang.reflect.Modifier;
+ import java.util.Arrays;
++import java.util.Collections;
+ import java.util.HashMap;
+ import java.util.HashSet;
++import java.util.LinkedHashSet;
+ import java.util.List;
++import java.util.Locale;
+ import java.util.Map;
+ import java.util.Set;
+ import java.util.concurrent.TimeUnit;
+@@ -190,6 +193,42 @@ public class SpigotConfig
+         tabComplete = getInt( "commands.tab-complete", 0 );
+     }
+ 
++    public static boolean playerCommandVisibilityEnabled;
++    public static Set<String> playerCommandVisibilityAllowlist =
++            Collections.emptySet();
++    private static void playerCommandVisibility()
++    {
++        playerCommandVisibilityEnabled = getBoolean(
++                "commands.player-command-visibility.enabled", true );
++        List configured = getList(
++                "commands.player-command-visibility.allowlist",
++                Collections.emptyList() );
++        Set<String> normalized = new LinkedHashSet<String>();
++        for ( Object entry : configured )
++        {
++            if ( entry == null )
++            {
++                continue;
++            }
++            String label = String.valueOf( entry ).trim().toLowerCase( Locale.ROOT );
++            while ( label.startsWith( "/" ) )
++            {
++                label = label.substring( 1 );
++            }
++            int separator = label.indexOf( ' ' );
++            if ( separator >= 0 )
++            {
++                label = label.substring( 0, separator );
++            }
++            if ( !label.isEmpty() && label.indexOf( ':' ) < 0 )
++            {
++                normalized.add( label );
++            }
++        }
++        playerCommandVisibilityAllowlist =
++                Collections.unmodifiableSet( normalized );
++    }
++
+     public static String whitelistMessage;
+     public static String unknownCommandMessage;
+     public static String serverFullMessage;
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -2045,6 +2045,13 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+             this.player.playerConnection.sendPacket(new PacketPlayOutTabComplete(new String[0]));
+             return;
+         }
++        if (!enumerationBypass
++                && org.spigotmc.SpigotConfig.playerCommandVisibilityEnabled
++                && !isAllowlistedCommandRequest(
++                    buffer, org.spigotmc.SpigotConfig.playerCommandVisibilityAllowlist)) {
++            this.player.playerConnection.sendPacket(new PacketPlayOutTabComplete(new String[0]));
++            return;
++        }
+         event = new com.destroystokyo.paper.event.server.AsyncTabCompleteEvent(this.getPlayer(), completions,
+             buffer, isCommand, blockpos != null ? new Location(player.world.getWorld(), blockpos.getX(), blockpos.getY(), blockpos.getZ()) : null);
+         event.callEvent();
+@@ -2070,6 +2077,11 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+             }
+         }
+         completions = sanitizeCommandCompletions(enumerationBypass, buffer, completions);
++        if (org.spigotmc.SpigotConfig.playerCommandVisibilityEnabled) {
++            completions = filterAllowlistedRootCommandCompletions(
++                    enumerationBypass, buffer, completions,
++                    org.spigotmc.SpigotConfig.playerCommandVisibilityAllowlist);
++        }
+         final org.bukkit.entity.Player bukkitPlayer = this.getPlayer();
+         completions = filterAuthorizedRootCommandCompletions(
+                 enumerationBypass, buffer, completions, label -> {
+@@ -2137,6 +2149,66 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         return authorized;
+     }
+ 
++    static boolean isAllowlistedCommandRequest(
++            String buffer, java.util.Set<String> allowlist) {
++        if (buffer == null || !buffer.startsWith("/")) {
++            return true;
++        }
++        String command = buffer.substring(1);
++        int whitespace = command.indexOf(' ');
++        String label = (whitespace < 0 ? command : command.substring(0, whitespace))
++                .toLowerCase(java.util.Locale.ROOT);
++        if (label.indexOf(':') >= 0) {
++            return false;
++        }
++        if (whitespace >= 0) {
++            return allowlist != null && allowlist.contains(label);
++        }
++        if (label.isEmpty()) {
++            return true;
++        }
++        if (allowlist != null) {
++            for (String allowed : allowlist) {
++                if (allowed.startsWith(label)) {
++                    return true;
++                }
++            }
++        }
++        return false;
++    }
++
++    static java.util.List<String> filterAllowlistedRootCommandCompletions(
++            boolean enumerationBypass, String buffer,
++            java.util.List<String> completions, java.util.Set<String> allowlist) {
++        if (enumerationBypass || buffer == null || !buffer.startsWith("/")
++                || buffer.indexOf(' ') >= 0 || completions == null
++                || completions.isEmpty()) {
++            return completions == null
++                    ? com.google.common.collect.ImmutableList.<String>of()
++                    : completions;
++        }
++
++        java.util.List<String> visible =
++                new java.util.ArrayList<>(completions.size());
++        for (String completion : completions) {
++            if (completion == null) {
++                continue;
++            }
++            String label = completion.startsWith("/")
++                    ? completion.substring(1) : completion;
++            int whitespace = label.indexOf(' ');
++            if (whitespace >= 0) {
++                label = label.substring(0, whitespace);
++            }
++            label = label.toLowerCase(java.util.Locale.ROOT);
++            if (label.indexOf(':') < 0 && allowlist != null
++                    && allowlist.contains(label)) {
++                visible.add(completion);
++            }
++        }
++        return visible;
++    }
++
+     static boolean isSensitiveHelpCompletionRequest(String buffer) {
+         if (buffer == null) {
+             return false;
+diff --git a/src/test/java/net/minecraft/server/PlayerConnectionCommandCompletionTest.java b/src/test/java/net/minecraft/server/PlayerConnectionCommandCompletionTest.java
+--- a/src/test/java/net/minecraft/server/PlayerConnectionCommandCompletionTest.java
++++ b/src/test/java/net/minecraft/server/PlayerConnectionCommandCompletionTest.java
+@@ -60,6 +60,72 @@ public class PlayerConnectionCommandCompletionTest {
+                 false, "/msg ", input, label -> false));
+     }
+ 
++    @Test
++    public void configurableAllowlistHidesEveryOtherRootCommand() {
++        Set<String> allowlist = new HashSet<>(
++                Arrays.asList("jobs", "shop", "f"));
++        List<String> result =
++                PlayerConnection.filterAllowlistedRootCommandCompletions(
++                    false, "/", Arrays.asList(
++                        "/jobs", "/ban", "/shop", "/f", "/minecraft:help"),
++                    allowlist);
++
++        assertEquals(Arrays.asList("/jobs", "/shop", "/f"), result);
++    }
++
++    @Test
++    public void bypassKeepsEveryRootSuggestion() {
++        List<String> input = Arrays.asList("/jobs", "/ban", "/bukkit:plugins");
++
++        assertEquals(input,
++                PlayerConnection.filterAllowlistedRootCommandCompletions(
++                    true, "/", input, new HashSet<String>()));
++    }
++
++    @Test
++    public void requestGateAllowsOnlyConfiguredRootsAndTheirPrefixes() {
++        Set<String> allowlist = new HashSet<>(
++                Arrays.asList("jobs", "shop"));
++
++        assertEquals(true, PlayerConnection.isAllowlistedCommandRequest(
++                "/", allowlist));
++        assertEquals(true, PlayerConnection.isAllowlistedCommandRequest(
++                "/jo", allowlist));
++        assertEquals(true, PlayerConnection.isAllowlistedCommandRequest(
++                "/jobs list", allowlist));
++        assertEquals(false, PlayerConnection.isAllowlistedCommandRequest(
++                "/ban Player", allowlist));
++        assertEquals(false, PlayerConnection.isAllowlistedCommandRequest(
++                "/bukkit:help ", allowlist));
++        assertEquals(true, PlayerConnection.isAllowlistedCommandRequest(
++                "hello", allowlist));
++    }
++
++    @Test
++    public void emptyAllowlistHidesAllRootCommandRequests() {
++        Set<String> allowlist = new HashSet<>();
++
++        assertEquals(true, PlayerConnection.isAllowlistedCommandRequest(
++                "/", allowlist));
++        assertEquals(false, PlayerConnection.isAllowlistedCommandRequest(
++                "/j", allowlist));
++        assertEquals(false, PlayerConnection.isAllowlistedCommandRequest(
++                "/jobs ", allowlist));
++        assertEquals(0,
++                PlayerConnection.filterAllowlistedRootCommandCompletions(
++                    false, "/", Arrays.asList("/jobs"), allowlist).size());
++    }
++
++    @Test
++    public void allowlistDoesNotChangeArgumentsOfVisibleCommands() {
++        List<String> input = Arrays.asList("PlayerOne", "PlayerTwo");
++
++        assertEquals(input,
++                PlayerConnection.filterAllowlistedRootCommandCompletions(
++                    false, "/msg ", input,
++                    new HashSet<>(Arrays.asList("msg"))));
++    }
++
+     @Test
+     public void recognizesHelpAliasesAndNamespacesCaseInsensitively() {
+         assertEquals(true, PlayerConnection.isSensitiveHelpCompletionRequest("/? "));
+-- 
+2.45.2.windows.1

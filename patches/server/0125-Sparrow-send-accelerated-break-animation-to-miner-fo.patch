@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Fri, 8 May 2026 01:00:32 +0200
+Subject: [PATCH] Sparrow: send accelerated break animation to miner for
+ boosted tools
+
+When a custom tool with bonusPermille > 0 triggers earlyBreak, also
+send PacketPlayOutBlockBreakAnimation directly to the mining player
+using a negative fake entity ID. This bypasses world.c() which excludes
+the miner, making the crack animation visually faster from their
+own perspective.
+
+Cleanup packets (stage=-1) are sent in all stop-mining paths:
+- Block becomes AIR while mining
+- sparrowEarlyBreak server break fires
+- e() (player stops digging externally)
+- a(BlockPosition) f>=0.7F (client STOP_DESTROY_BLOCK with break)
+- a(BlockPosition) else-if-!h (transition to slow-break)
+
+diff --git a/src/main/java/net/minecraft/server/PlayerInteractManager.java b/src/main/java/net/minecraft/server/PlayerInteractManager.java
+index 54aef6985e1bca5aa7d743cbf34679440712ac56..3f858232f016fe03cad723b782ab37ae81e8d363 100644
+--- a/src/main/java/net/minecraft/server/PlayerInteractManager.java
++++ b/src/main/java/net/minecraft/server/PlayerInteractManager.java
+@@ -100,6 +100,10 @@ public class PlayerInteractManager {
+                 this.world.c(this.player.getId(), this.f, -1);
+                 this.k = -1;
+                 this.d = false;
++                // SparrowItem start - clear fake player animation if any
++                ((EntityPlayer) this.player).playerConnection.sendPacket(
++                    new PacketPlayOutBlockBreakAnimation(-(this.player.getId() + 1), this.f, -1));
++                // SparrowItem end
+             } else {
+                 int k = this.currentTick - this.lastDigTick;
+ 
+@@ -124,10 +128,21 @@ public class PlayerInteractManager {
+                     this.world.c(this.player.getId(), this.f, i);
+                     this.k = i;
+                 }
++                // SparrowItem start - send accelerated crack animation to the miner themselves
++                // Uses a negative fake entity ID so it does not overwrite the client's own local mining state.
++                // The client renders both overlapping; the higher stage (boosted) visually dominates.
++                if (sparrowEarlyBreak) {
++                    ((EntityPlayer) this.player).playerConnection.sendPacket(
++                        new PacketPlayOutBlockBreakAnimation(-(this.player.getId() + 1), this.f, i));
++                }
++                // SparrowItem end
+                 // Server-side break only for genuinely boosted items with earlyBreakMode != never.
+                 // Vanilla, unconfigured, and bonusPermille=0 items follow the upstream client-driven break.
+                 if (sparrowEarlyBreak && f >= 1.0F) {
+                     this.d = false;
++                    // SparrowItem: clear fake animation before the block change packet reaches the client
++                    ((EntityPlayer) this.player).playerConnection.sendPacket(
++                        new PacketPlayOutBlockBreakAnimation(-(this.player.getId() + 1), this.f, -1));
+                     this.breakBlock(this.f);
+                 }
+             }
+@@ -264,12 +279,20 @@ public class PlayerInteractManager {
+                 if (f >= 0.7F) {
+                     this.d = false;
+                     this.world.c(this.player.getId(), blockposition, -1);
++                    // SparrowItem start - clear fake player animation if any
++                    ((EntityPlayer) this.player).playerConnection.sendPacket(
++                        new PacketPlayOutBlockBreakAnimation(-(this.player.getId() + 1), blockposition, -1));
++                    // SparrowItem end
+                     this.breakBlock(blockposition);
+                 } else if (!this.h) {
+                     this.d = false;
+                     this.h = true;
+                     this.i = blockposition;
+                     this.j = this.lastDigTick;
++                    // SparrowItem start - clear fake player animation, transitioning to slow-break
++                    ((EntityPlayer) this.player).playerConnection.sendPacket(
++                        new PacketPlayOutBlockBreakAnimation(-(this.player.getId() + 1), blockposition, -1));
++                    // SparrowItem end
+                 }
+             }
+         // CraftBukkit start - Force block reset to client
+@@ -283,6 +306,10 @@ public class PlayerInteractManager {
+     public void e() {
+         this.d = false;
+         this.world.c(this.player.getId(), this.f, -1);
++        // SparrowItem start - clear fake player animation if any
++        ((EntityPlayer) this.player).playerConnection.sendPacket(
++            new PacketPlayOutBlockBreakAnimation(-(this.player.getId() + 1), this.f, -1));
++        // SparrowItem end
+     }
+ 
+     private boolean c(BlockPosition blockposition) {

@@ -403,10 +403,10 @@ index 0000000000000000000000000000000000000000..97f1e35dc264e889684333e51f7cc42b
 +}
 diff --git a/src/main/java/com/hpfxd/pandaspigot/config/SparrowMiningConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/SparrowMiningConfig.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..64f96995717e8814e0904b9b786632c70f8fe7ed
+index 0000000000000000000000000000000000000000..b406517acc40099703517a03c1fef8b579c89cd2
 --- /dev/null
 +++ b/src/main/java/com/hpfxd/pandaspigot/config/SparrowMiningConfig.java
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,141 @@
 +package com.hpfxd.pandaspigot.config;
 +
 +import java.io.File;
@@ -475,11 +475,20 @@ index 0000000000000000000000000000000000000000..64f96995717e8814e0904b9b786632c7
 +    }
 +
 +    private static void validateIds(SparrowMiningConfig cfg) {
-+        if (cfg.customMiningSpeedMultiplier == null) return;
-+        for (String id : cfg.customMiningSpeedMultiplier.keySet()) {
-+            if (!VALID_ID.matcher(id).matches()) {
-+                LOGGER.warning("[Sparrow] sparrow-mining.yml: invalid id '" + id
-+                        + "' in customMiningSpeedMultiplier — ids must match [a-z0-9_\\-]+");
++        if (cfg.customMiningProfiles != null) {
++            for (String id : cfg.customMiningProfiles.keySet()) {
++                if (!VALID_ID.matcher(id).matches()) {
++                    LOGGER.warning("[Sparrow] sparrow-mining.yml: invalid id '" + id
++                            + "' in customMiningProfiles — ids must match [a-z0-9_\\-]+");
++                }
++            }
++        }
++        if (cfg.customMiningSpeedMultiplier != null) {
++            for (String id : cfg.customMiningSpeedMultiplier.keySet()) {
++                if (!VALID_ID.matcher(id).matches()) {
++                    LOGGER.warning("[Sparrow] sparrow-mining.yml: invalid id '" + id
++                            + "' in customMiningSpeedMultiplier (legacy) — ids must match [a-z0-9_\\-]+");
++                }
 +            }
 +        }
 +    }
@@ -490,15 +499,53 @@ index 0000000000000000000000000000000000000000..64f96995717e8814e0904b9b786632c7
 +
 +    // ----------------------------------------------------------------------------
 +
-+    @Comment("Mining speed multipliers for custom tools (sparrowmc-item NBT tag).\n" +
-+            "Each key is a sparrowmc-item id, each value is a multiplier applied to every\n" +
-+            "Block.getDamage() call during block break progress.\n" +
-+            "  1.0 = vanilla speed, 1.30 = 30%% faster, 2.0 = twice as fast.\n" +
-+            "Leave empty to preserve vanilla mining speed on all tools.\n" +
-+            "Example:\n" +
-+            "  customMiningSpeedMultiplier:\n" +
-+            "    pioche_topaze: 1.30\n" +
-+            "    pioche_azurite: 1.45")
++    /**
++     * V2 mining profile for a custom tool (sparrowmc-item NBT tag).
++     * Controls tick-aware speed with a stone-class guard and early-break policy.
++     */
++    @ConfigSerializable
++    public static class MiningProfile {
++        @Comment("Outil vanilla de référence — CHAMP INFORMATIF UNIQUEMENT, sans effet moteur.\n"
++                + "Le moteur utilise Block.getDamage() avec l'outil réel du joueur.\n"
++                + "Ce champ documente l'intention produit pour éviter les réglages incohérents.\n"
++                + "Valeurs : wood_pickaxe | stone_pickaxe | iron_pickaxe | diamond_pickaxe | gold_pickaxe")
++        public String baselineTool = "diamond_pickaxe";
++
++        @Comment("Intended speed gain in permille relative to the baseline tool.\n"
++                + "0 = vanilla, 15 = +1.5%, 200 = +20%.\n"
++                + "The motor applies this honestly: a small permille on slow blocks may produce no visible tick change.")
++        public int bonusPermille = 0;
++
++        @Comment("Maximum number of ticks the motor may gain on stone-class blocks (Material.STONE, hardness ~1.5-2.0).\n"
++                + "0 = never accelerate on stone, 1 = at most one tick faster. Default: 0.")
++        public int maxStoneTickGain = 0;
++
++        @Comment("Whether the server may break the block before the client STOP_DESTROY_BLOCK packet.\n"
++                + "auto = allow when effectiveMult > 1.0 | never = always wait for the client packet")
++        public String earlyBreakMode = "auto";
++    }
++
++    // V2 tick-aware profiles — preferred over customMiningSpeedMultiplier for new configurations.
++    @Comment("V2 tick-aware mining profiles keyed by sparrowmc-item id.\n"
++            + "Takes precedence over customMiningSpeedMultiplier when an id appears in both.\n"
++            + "Example:\n"
++            + "  customMiningProfiles:\n"
++            + "    pioche_saphir:\n"
++            + "      baselineTool: diamond_pickaxe\n"
++            + "      bonusPermille: 15\n"
++            + "      maxStoneTickGain: 0\n"
++            + "      earlyBreakMode: auto\n"
++            + "    pioche_azurite:\n"
++            + "      baselineTool: diamond_pickaxe\n"
++            + "      bonusPermille: 200\n"
++            + "      maxStoneTickGain: 1\n"
++            + "      earlyBreakMode: auto")
++    public Map<String, MiningProfile> customMiningProfiles = new HashMap<>();
++
++    // V1 legacy — kept for backward compatibility. Use customMiningProfiles for new entries.
++    @Comment("Legacy V1 multipliers (raw float, no stone guard, no tick-aware clamping).\n"
++            + "If an id exists in both sections, customMiningProfiles takes precedence.\n"
++            + "1.0 = vanilla, 1.30 = 30%% faster. Leave empty to disable legacy overrides.")
 +    public Map<String, Double> customMiningSpeedMultiplier = new HashMap<>();
 +}
 diff --git a/src/main/java/com/hpfxd/pandaspigot/util/SparrowArmorDurabilityRegistry.java b/src/main/java/com/hpfxd/pandaspigot/util/SparrowArmorDurabilityRegistry.java
@@ -870,41 +917,106 @@ index 0000000000000000000000000000000000000000..1d717ffdc35b75af0c50cbb4d5ebc548
 +}
 diff --git a/src/main/java/com/hpfxd/pandaspigot/util/SparrowMiningRegistry.java b/src/main/java/com/hpfxd/pandaspigot/util/SparrowMiningRegistry.java
 new file mode 100644
-index 0000000000000000000000000000000000000000..f075d4b783046c9cac88479e548d577f32bcb5d8
+index 0000000000000000000000000000000000000000..c13f79a93fce0cc51b354038156ddb709f936f3d
 --- /dev/null
 +++ b/src/main/java/com/hpfxd/pandaspigot/util/SparrowMiningRegistry.java
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,98 @@
 +package com.hpfxd.pandaspigot.util;
-+
-+import java.util.Map;
 +
 +import com.hpfxd.pandaspigot.config.SparrowMiningConfig;
 +
 +/**
-+ * Lookup helper for custom mining speed multipliers (sparrowmc-item NBT key).
++ * Lookup helpers for custom mining speed — V2 profile-based (tick-aware) with V1 legacy fallback.
 + *
-+ * Values are read at call time from SparrowMiningConfig.customMiningSpeedMultiplier.
-+ * Returns 1.0 for null ids, unknown ids, or uninitialised config — vanilla behavior preserved.
++ * V2 path: customMiningProfiles — MiningProfile with bonusPermille, maxStoneTickGain, earlyBreakMode.
++ *          The motor applies a stone-class guard (Material.STONE) via resolveEffectiveMult().
++ * V1 path: customMiningSpeedMultiplier — raw float multiplier, no stone guard, backward compat.
 + *
-+ * Applied in PlayerInteractManager after every Block.getDamage() call.
-+ * A multiplier of 2.0 means twice as fast; 1.0 is vanilla.
++ * null / unknown id / bonusPermille <= 0 → returns null profile → vanilla preserved exactly.
 + */
 +public final class SparrowMiningRegistry {
 +
 +    private SparrowMiningRegistry() {}
 +
 +    /**
-+     * Returns the mining speed multiplier for the given custom tool id.
-+     * Returns 1.0f if the id is null, unknown, or the config section is empty — vanilla preserved.
++     * Returns the V2 profile for the given id, or a synthetic profile wrapping a V1 entry.
++     * Returns null when the id is not configured or the configured value is vanilla (bonusPermille <= 0).
++     * null → no speed change, vanilla behavior preserved.
++     */
++    public static SparrowMiningConfig.MiningProfile getProfile(String sparrowId) {
++        if (sparrowId == null) return null;
++        SparrowMiningConfig cfg = SparrowMiningConfig.get();
++        if (cfg == null) return null;
++
++        // V2 first — explicit profile takes precedence
++        if (cfg.customMiningProfiles != null) {
++            SparrowMiningConfig.MiningProfile p = cfg.customMiningProfiles.get(sparrowId);
++            if (p != null && p.bonusPermille > 0) return p;
++        }
++
++        // V1 legacy fallback — wrap as synthetic profile, no stone guard
++        if (cfg.customMiningSpeedMultiplier != null) {
++            Double m = cfg.customMiningSpeedMultiplier.get(sparrowId);
++            if (m != null && m > 1.0) {
++                SparrowMiningConfig.MiningProfile synthetic = new SparrowMiningConfig.MiningProfile();
++                synthetic.bonusPermille = (int) Math.round((m - 1.0) * 1000.0);
++                synthetic.maxStoneTickGain = -1; // sentinel: no stone guard for legacy entries
++                synthetic.earlyBreakMode = "auto";
++                return synthetic;
++            }
++        }
++
++        return null;
++    }
++
++    /**
++     * Resolves the effective multiplier for a profile, applying the maxStoneTickGain guard
++     * when the block is stone-class (Material.STONE).
++     *
++     * Stone guard logic (maxStoneTickGain >= 0):
++     *   vanillaTicks  = ceil(1.0 / baseDamage)
++     *   boostedTicks  = ceil(1.0 / (baseDamage * rawMult))
++     *   if (vanillaTicks - boostedTicks) > maxStoneTickGain → clamp mult
++     *
++     * @param profile      a non-null profile with bonusPermille > 0
++     * @param baseDamage   Block.getDamage() result for the current block/tool pair (per-tick fraction)
++     * @param isStoneClass true when the target block's material is Material.STONE
++     * @return effective multiplier >= 1.0f to apply to the accumulated damage
++     */
++    public static float resolveEffectiveMult(SparrowMiningConfig.MiningProfile profile,
++                                             float baseDamage, boolean isStoneClass) {
++        float rawMult = 1.0f + profile.bonusPermille / 1000.0f;
++
++        // No stone guard: legacy sentinel, not stone-class, or baseDamage invalid
++        if (!isStoneClass || profile.maxStoneTickGain < 0 || baseDamage <= 0.0f) {
++            return rawMult;
++        }
++
++        // Tick-aware guard
++        int vanillaTicks = (int) Math.ceil(1.0 / (double) baseDamage);
++        int boostedTicks = (int) Math.ceil(1.0 / ((double) baseDamage * rawMult));
++        int tickGain = vanillaTicks - boostedTicks;
++
++        if (tickGain <= profile.maxStoneTickGain) return rawMult;
++
++        // Clamp to exactly maxStoneTickGain ticks of gain
++        if (profile.maxStoneTickGain == 0) return 1.0f;
++        int targetTicks = Math.max(1, vanillaTicks - profile.maxStoneTickGain);
++        // Minimum mult such that baseDamage * mult * targetTicks >= 1.0 (with epsilon for float precision)
++        float clampedMult = (float) (1.001 / ((double) baseDamage * targetTicks));
++        return Math.min(rawMult, clampedMult);
++    }
++
++    /**
++     * Returns the raw speed multiplier without tick-aware stone guard.
++     * Used in a(BlockPosition, EnumDirection) and a(BlockPosition) single-tick contexts
++     * where the per-tick clamping logic does not apply.
++     * Returns 1.0f for null, unknown, or unconfigured ids — vanilla preserved.
 +     */
 +    public static float getSpeedMultiplier(String sparrowId) {
-+        if (sparrowId == null) { return 1.0f; }
-+        SparrowMiningConfig cfg = SparrowMiningConfig.get();
-+        if (cfg == null) { return 1.0f; }
-+        Map<String, Double> multipliers = cfg.customMiningSpeedMultiplier;
-+        if (multipliers == null) { return 1.0f; }
-+        Double m = multipliers.get(sparrowId);
-+        return m != null ? m.floatValue() : 1.0f;
++        SparrowMiningConfig.MiningProfile p = getProfile(sparrowId);
++        if (p == null) return 1.0f;
++        return Math.max(1.0f, 1.0f + p.bonusPermille / 1000.0f);
 +    }
 +}
 diff --git a/src/main/java/com/hpfxd/pandaspigot/util/SparrowWeaponRegistry.java b/src/main/java/com/hpfxd/pandaspigot/util/SparrowWeaponRegistry.java
@@ -1049,9 +1161,21 @@ index 015ce283495dc57c8a9dc018ad36a04ebfd637d0..8e88ffe736d20cb44b1d71cc71119226
                      entityliving.b(this);
                      --this.count;
 diff --git a/src/main/java/net/minecraft/server/PlayerInteractManager.java b/src/main/java/net/minecraft/server/PlayerInteractManager.java
-index 4a6b183900ff2b17084e45ac54b8b079ab8628cb..3bb2e1c0ad3cbd41ee5acbb04007a9ac9959547f 100644
+index 4a6b183900ff2b17084e45ac54b8b079ab8628cb..54aef6985e1bca5aa7d743cbf34679440712ac56 100644
 --- a/src/main/java/net/minecraft/server/PlayerInteractManager.java
 +++ b/src/main/java/net/minecraft/server/PlayerInteractManager.java
+@@ -1,10 +1,10 @@
+ package net.minecraft.server;
+ 
+ // CraftBukkit start
+-import org.bukkit.event.block.BlockBreakEvent;
+ import org.bukkit.craftbukkit.event.CraftEventFactory;
+ import org.bukkit.event.Event;
+ import org.bukkit.event.block.Action;
++import org.bukkit.event.block.BlockBreakEvent;
+ import org.bukkit.event.player.PlayerInteractEvent;
+ // CraftBukkit end
+ 
 @@ -59,6 +59,9 @@ public class PlayerInteractManager {
  
      public void a() {
@@ -1062,37 +1186,91 @@ index 4a6b183900ff2b17084e45ac54b8b079ab8628cb..3bb2e1c0ad3cbd41ee5acbb04007a9ac
          float f;
          int i;
  
-@@ -70,6 +73,7 @@ public class PlayerInteractManager {
+@@ -69,7 +72,16 @@ public class PlayerInteractManager {
+             if (block.getMaterial() == Material.AIR) {
                  this.h = false;
              } else {
-                 f = block.getDamage(this.player, this.player.world, this.i) * (float) (j + 1);
-+                f *= com.hpfxd.pandaspigot.util.SparrowMiningRegistry.getSpeedMultiplier(sparrowToolId); // SparrowItem
+-                f = block.getDamage(this.player, this.player.world, this.i) * (float) (j + 1);
++                float baseDamageH = block.getDamage(this.player, this.player.world, this.i);
++                f = baseDamageH * (float) (j + 1);
++                // SparrowItem start - V2 tick-aware mining speed (slow-break path)
++                com.hpfxd.pandaspigot.config.SparrowMiningConfig.MiningProfile sparrowProfileH =
++                    com.hpfxd.pandaspigot.util.SparrowMiningRegistry.getProfile(sparrowToolId);
++                if (sparrowProfileH != null && sparrowProfileH.bonusPermille > 0 && baseDamageH > 0.0f) {
++                    f *= com.hpfxd.pandaspigot.util.SparrowMiningRegistry.resolveEffectiveMult(
++                        sparrowProfileH, baseDamageH, block.getMaterial() == Material.STONE);
++                }
++                // SparrowItem end
                  i = (int) (f * 10.0F);
                  if (i != this.k) {
                      this.world.c(this.player.getId(), this.i, i);
-@@ -92,6 +96,7 @@ public class PlayerInteractManager {
+@@ -91,12 +103,33 @@ public class PlayerInteractManager {
+             } else {
                  int k = this.currentTick - this.lastDigTick;
  
-                 f = block1.getDamage(this.player, this.player.world, this.i) * (float) (k + 1);
-+                f *= com.hpfxd.pandaspigot.util.SparrowMiningRegistry.getSpeedMultiplier(sparrowToolId); // SparrowItem
+-                f = block1.getDamage(this.player, this.player.world, this.i) * (float) (k + 1);
++                // SparrowItem: use this.f (current dig position) not this.i (slow-break position)
++                float baseDamageD = block1.getDamage(this.player, this.player.world, this.f);
++                f = baseDamageD * (float) (k + 1);
++                // SparrowItem start - V2 tick-aware custom mining speed
++                com.hpfxd.pandaspigot.config.SparrowMiningConfig.MiningProfile sparrowProfile =
++                    com.hpfxd.pandaspigot.util.SparrowMiningRegistry.getProfile(sparrowToolId);
++                boolean sparrowEarlyBreak = false;
++                if (sparrowProfile != null && sparrowProfile.bonusPermille > 0 && baseDamageD > 0.0f) {
++                    float effectiveMult = com.hpfxd.pandaspigot.util.SparrowMiningRegistry.resolveEffectiveMult(
++                        sparrowProfile, baseDamageD, block1.getMaterial() == Material.STONE);
++                    if (effectiveMult > 1.0f) {
++                        f *= effectiveMult;
++                        sparrowEarlyBreak = !"never".equals(sparrowProfile.earlyBreakMode);
++                    }
++                }
++                // SparrowItem end
                  i = (int) (f * 10.0F);
                  if (i != this.k) {
                      this.world.c(this.player.getId(), this.f, i);
-@@ -161,6 +166,8 @@ public class PlayerInteractManager {
+                     this.k = i;
+                 }
++                // Server-side break only for genuinely boosted items with earlyBreakMode != never.
++                // Vanilla, unconfigured, and bonusPermille=0 items follow the upstream client-driven break.
++                if (sparrowEarlyBreak && f >= 1.0F) {
++                    this.d = false;
++                    this.breakBlock(this.f);
++                }
+             }
+         }
+ 
+@@ -161,6 +194,15 @@ public class PlayerInteractManager {
              } else if (block.getMaterial() != Material.AIR) {
                  block.attack(this.world, blockposition, this.player);
                  f = block.getDamage(this.player, this.player.world, blockposition);
-+                f *= com.hpfxd.pandaspigot.util.SparrowMiningRegistry.getSpeedMultiplier( // SparrowItem start
-+                    com.hpfxd.pandaspigot.util.SparrowItem.getCustomId(this.player.bZ())); // SparrowItem end
++                // SparrowItem start - V2 tick-aware mining (first-click insta-break check)
++                com.hpfxd.pandaspigot.config.SparrowMiningConfig.MiningProfile sparrowProfileInit =
++                    com.hpfxd.pandaspigot.util.SparrowMiningRegistry.getProfile(
++                        com.hpfxd.pandaspigot.util.SparrowItem.getCustomId(this.player.bZ()));
++                if (sparrowProfileInit != null && sparrowProfileInit.bonusPermille > 0 && f > 0.0f) {
++                    f *= com.hpfxd.pandaspigot.util.SparrowMiningRegistry.resolveEffectiveMult(
++                        sparrowProfileInit, f, block.getMaterial() == Material.STONE);
++                }
++                // SparrowItem end
                  // Allow fire punching to be blocked
                  this.world.douseFire((EntityHuman) null, blockposition, enumdirection);
              }
-@@ -208,6 +215,8 @@ public class PlayerInteractManager {
+@@ -207,7 +249,17 @@ public class PlayerInteractManager {
+             Block block = this.world.getType(blockposition).getBlock();
  
              if (block.getMaterial() != Material.AIR) {
-                 float f = block.getDamage(this.player, this.player.world, blockposition) * (float) (i + 1);
-+                f *= com.hpfxd.pandaspigot.util.SparrowMiningRegistry.getSpeedMultiplier( // SparrowItem start
-+                    com.hpfxd.pandaspigot.util.SparrowItem.getCustomId(this.player.bZ())); // SparrowItem end
+-                float f = block.getDamage(this.player, this.player.world, blockposition) * (float) (i + 1);
++                float baseDamageStop = block.getDamage(this.player, this.player.world, blockposition);
++                float f = baseDamageStop * (float) (i + 1);
++                // SparrowItem start - V2 tick-aware mining (client STOP_DESTROY_BLOCK confirmation)
++                com.hpfxd.pandaspigot.config.SparrowMiningConfig.MiningProfile sparrowProfileStop =
++                    com.hpfxd.pandaspigot.util.SparrowMiningRegistry.getProfile(
++                        com.hpfxd.pandaspigot.util.SparrowItem.getCustomId(this.player.bZ()));
++                if (sparrowProfileStop != null && sparrowProfileStop.bonusPermille > 0 && baseDamageStop > 0.0f) {
++                    f *= com.hpfxd.pandaspigot.util.SparrowMiningRegistry.resolveEffectiveMult(
++                        sparrowProfileStop, baseDamageStop, block.getMaterial() == Material.STONE);
++                }
++                // SparrowItem end
  
                  if (f >= 0.7F) {
                      this.d = false;

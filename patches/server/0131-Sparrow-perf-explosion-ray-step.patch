@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Sat, 30 May 2026 12:00:00 +0200
+Subject: [PATCH] Sparrow perf: explosion ray step configurable
+
+Optimise le calcul de la sphere d explosion dans Explosion.a() :
+
+  explosion.rayStep (SparrowPerfConfig) controle le pas d echantillonnage
+  des rayons de la sphere 16x16x16.
+
+  Valeurs :
+    1 = vanilla (1352 rayons par explosion, defaut)
+    2 = ~296 rayons (~78% de reduction, recommande pour factions)
+    3 = ~150 rayons (~89% de reduction, legere imprecision sur les bords)
+
+  La condition de surface est adaptee :
+    k + step > 15  (au lieu de k == 15)
+  pour couvrir correctement la face distale quel que soit le step.
+
+Gains attendus avec rayStep=2 lors de cannons actifs :
+   -70 a -80% CPU imputable aux explosions.
+   Sur serveur idle : aucun impact (pas d explosions = rien a calculer).
+   Indetectable en jeu pour le joueur moyen (dommages aux blocs en bordure
+   de sphere inchanges sur le coeur ; legere imprecision aux bords extremes).
+
+diff --git a/src/main/java/net/minecraft/server/Explosion.java b/src/main/java/net/minecraft/server/Explosion.java
+index e605298073e4911c746d06465d09d6cae0a63f6c..451f74a9581f60eb208c89562b54ed7aa0c05013 100644
+--- a/src/main/java/net/minecraft/server/Explosion.java
++++ b/src/main/java/net/minecraft/server/Explosion.java
+@@ -72,10 +72,11 @@ public class Explosion {
+         Block block = world.getChunkAt((int) posX >> 4, (int) posZ >> 4).getBlockData(new BlockPosition(posX, posY, posZ)).getBlock(); // PandaSpigot - get block of the explosion
+ 
+         if (!this.world.pandaSpigotConfig.optimizeLiquidExplosions || !block.getMaterial().isLiquid()) { // PandaSpigot - skip calculating what blocks to blow up in water/lava
+-        for (int k = 0; k < 16; ++k) {
+-            for (i = 0; i < 16; ++i) {
+-                for (j = 0; j < 16; ++j) {
+-                    if (k == 0 || k == 15 || i == 0 || i == 15 || j == 0 || j == 15) {
++        int sparrowRayStep = com.hpfxd.pandaspigot.config.SparrowPerfConfig.explosionRayStep; // SparrowPerf
++        for (int k = 0; k < 16; k += sparrowRayStep) {
++            for (i = 0; i < 16; i += sparrowRayStep) {
++                for (j = 0; j < 16; j += sparrowRayStep) {
++                    if (k == 0 || k + sparrowRayStep > 15 || i == 0 || i + sparrowRayStep > 15 || j == 0 || j + sparrowRayStep > 15) { // SparrowPerf
+                         double d0 = (double) ((float) k / 15.0F * 2.0F - 1.0F);
+                         double d1 = (double) ((float) i / 15.0F * 2.0F - 1.0F);
+                         double d2 = (double) ((float) j / 15.0F * 2.0F - 1.0F);

@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Thu, 29 May 2026 12:00:00 +0200
+Subject: [PATCH] Sparrow trapped chest: pas de double + 54 slots
+
+Modifications sur BlockChest et TileEntityChest :
+
+1. BlockChest.canPlace() - coffre piege (b==1) :
+   Interdit le placement adjacent a un autre coffre piege.
+   Un coffre piege ne peut pas former de double coffre.
+   Les coffres normaux conservent leur comportement vanilla.
+
+2. BlockChest.a(World, int) - fabrique de TileEntity :
+   Pour b==1, cree un TileEntityChest avec sparrowLargeChest=true
+   et redimensionne items[] a 54 slots.
+
+3. TileEntityChest :
+   - items[] passe de private a package-private (acces depuis BlockChest).
+   - Nouveau champ : sparrowLargeChest (boolean, false par defaut).
+   - getSize() retourne 54 si sparrowLargeChest, sinon 27.
+   - a(NBTTagCompound) lit "SparrowLargeChest" avant de redimensionner items[].
+   - b(NBTTagCompound) sauvegarde "SparrowLargeChest" si actif.
+
+Resultat :
+   - Coffre piege seul = 54 slots (6 rangees), ouverture normale.
+   - Coffre normal = inchange (27 slots, double possible).
+   - Compatible client vanilla 1.8 (type de fenetre chest, 54 slots).
+
+diff --git a/src/main/java/net/minecraft/server/BlockChest.java b/src/main/java/net/minecraft/server/BlockChest.java
+index 0cbbcd05e..240b8daef 100644
+--- a/src/main/java/net/minecraft/server/BlockChest.java
++++ b/src/main/java/net/minecraft/server/BlockChest.java
+@@ -238,6 +238,14 @@ public class BlockChest extends BlockContainer {
+     }
+ 
+     public boolean canPlace(World world, BlockPosition blockposition) {
++        // SparrowChest start - trapped chests cannot be placed adjacent to another trapped chest
++        if (this.b == 1) {
++            return world.getType(blockposition.west()).getBlock() != this
++                && world.getType(blockposition.east()).getBlock() != this
++                && world.getType(blockposition.north()).getBlock() != this
++                && world.getType(blockposition.south()).getBlock() != this;
++        }
++        // SparrowChest end
+         int i = 0;
+         BlockPosition blockposition1 = blockposition.west();
+         BlockPosition blockposition2 = blockposition.east();
+@@ -380,7 +388,12 @@ public class BlockChest extends BlockContainer {
+     }
+ 
+     public TileEntity a(World world, int i) {
+-        return new TileEntityChest();
++        TileEntityChest chest = new TileEntityChest();
++        if (this.b == 1) { // SparrowChest - trapped chest gets 54-slot inventory
++            chest.sparrowLargeChest = true;
++            chest.items = new ItemStack[54];
++        }
++        return chest;
+     }
+ 
+     public boolean isPowerSource() {
+diff --git a/src/main/java/net/minecraft/server/TileEntityChest.java b/src/main/java/net/minecraft/server/TileEntityChest.java
+index 5192d959b..2691d755d 100644
+--- a/src/main/java/net/minecraft/server/TileEntityChest.java
++++ b/src/main/java/net/minecraft/server/TileEntityChest.java
+@@ -10,7 +10,8 @@ import org.bukkit.entity.HumanEntity;
+ 
+ public class TileEntityChest extends TileEntityContainer implements IInventory { // PaperSpigot - remove IUpdatePlayerListBox
+ 
+-    private ItemStack[] items = new ItemStack[27];
++    ItemStack[] items = new ItemStack[27]; // SparrowChest - package-private for BlockChest
++    public boolean sparrowLargeChest = false; // SparrowChest - trapped chest 54-slot flag
+     public boolean a;
+     public TileEntityChest f; // PaperSpigot - adjacentChestZNeg
+     public TileEntityChest g; // PaperSpigot - adjacentChestXPos
+@@ -51,7 +52,7 @@ public class TileEntityChest extends TileEntityContainer implements IInventory {
+     // CraftBukkit end
+ 
+     public int getSize() {
+-        return 27;
++        return this.sparrowLargeChest ? 54 : 27; // SparrowChest
+     }
+ 
+     public ItemStack getItem(int i) {
+@@ -115,6 +116,7 @@ public class TileEntityChest extends TileEntityContainer implements IInventory {
+ 
+     public void a(NBTTagCompound nbttagcompound) {
+         super.a(nbttagcompound);
++        this.sparrowLargeChest = nbttagcompound.getBoolean("SparrowLargeChest"); // SparrowChest
+         NBTTagList nbttaglist = nbttagcompound.getList("Items", 10);
+ 
+         this.items = new ItemStack[this.getSize()];
+@@ -148,6 +150,7 @@ public class TileEntityChest extends TileEntityContainer implements IInventory {
+         }
+ 
+         nbttagcompound.set("Items", nbttaglist);
++        if (this.sparrowLargeChest) nbttagcompound.setBoolean("SparrowLargeChest", true); // SparrowChest
+         if (this.hasCustomName()) {
+             nbttagcompound.setString("CustomName", this.p);
+         }

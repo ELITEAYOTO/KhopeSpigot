@@ -1,0 +1,350 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Wed, 20 May 2026 23:06:48 +0200
+Subject: [PATCH] Sparrow V7: /khope mining debug command + SparrowDebugHelper
+
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/command/KhopeMiningCommand.java b/src/main/java/com/hpfxd/pandaspigot/command/KhopeMiningCommand.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..7e6882850eb6ef58ab56e4799abff93d642b9bf7
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/command/KhopeMiningCommand.java
+@@ -0,0 +1,159 @@
++package com.hpfxd.pandaspigot.command;
++
++import java.io.File;
++import java.util.Arrays;
++import java.util.List;
++import java.util.UUID;
++
++import org.bukkit.ChatColor;
++import org.bukkit.Material;
++import org.bukkit.command.Command;
++import org.bukkit.command.CommandSender;
++import org.bukkit.craftbukkit.entity.CraftPlayer;
++import org.bukkit.craftbukkit.util.CraftMagicNumbers;
++import org.bukkit.entity.Player;
++
++import com.hpfxd.pandaspigot.config.SparrowMiningConfig;
++import com.hpfxd.pandaspigot.util.SparrowDebugHelper;
++import com.hpfxd.pandaspigot.util.SparrowMiningRegistry;
++
++import net.minecraft.server.Block;
++import net.minecraft.server.EntityPlayer;
++import net.minecraft.server.MinecraftServer;
++
++/**
++ * /khope mining ... - debug et reload de la configuration de minage V7.
++ *
++ * Sous-commandes :
++ *   /khope mining debug on|off|status|sim &lt;MATERIAL&gt;
++ *   /khope mining reload
++ *
++ * Permission : OP uniquement.
++ */
++public class KhopeMiningCommand extends Command {
++
++    public KhopeMiningCommand() {
++        super("khope");
++        this.description = "SparrowMC mining debug & reload";
++        this.usageMessage = "/khope mining <debug|reload> ...";
++        this.setPermission("khope.mining");
++    }
++
++    @Override
++    public boolean execute(CommandSender sender, String currentAlias, String[] args) {
++        if (!sender.isOp()) {
++            sender.sendMessage(ChatColor.RED + "Cette commande est reservee aux OP.");
++            return true;
++        }
++
++        if (args.length == 0 || !"mining".equalsIgnoreCase(args[0])) {
++            sendUsage(sender);
++            return true;
++        }
++
++        if (args.length == 1) {
++            sendUsage(sender);
++            return true;
++        }
++
++        String sub = args[1].toLowerCase();
++
++        if ("reload".equals(sub)) {
++            return handleReload(sender);
++        }
++
++        if ("debug".equals(sub)) {
++            return handleDebug(sender, args);
++        }
++
++        sendUsage(sender);
++        return true;
++    }
++
++    private boolean handleReload(CommandSender sender) {
++        try {
++            File file = (File) MinecraftServer.getServer().options.valueOf("sparrow-mining");
++            SparrowMiningConfig.init(file);
++            sender.sendMessage(ChatColor.GREEN + "[KHOPE] sparrow-mining.yml recharge.");
++        } catch (Throwable t) {
++            sender.sendMessage(ChatColor.RED + "[KHOPE] Echec du reload : " + t.getMessage());
++        }
++        return true;
++    }
++
++    private boolean handleDebug(CommandSender sender, String[] args) {
++        if (!(sender instanceof Player)) {
++            sender.sendMessage(ChatColor.RED + "/khope mining debug ne peut etre utilise qu'en jeu.");
++            return true;
++        }
++        Player bukkitPlayer = (Player) sender;
++        EntityPlayer nmsPlayer = ((CraftPlayer) bukkitPlayer).getHandle();
++        UUID uuid = bukkitPlayer.getUniqueId();
++
++        if (args.length < 3) {
++            sendUsage(sender);
++            return true;
++        }
++
++        String action = args[2].toLowerCase();
++        switch (action) {
++            case "on":
++                SparrowMiningRegistry.setDebugActive(uuid, true);
++                sender.sendMessage(ChatColor.GREEN + "[KHOPE-MINING] debug ON");
++                return true;
++            case "off":
++                SparrowMiningRegistry.setDebugActive(uuid, false);
++                sender.sendMessage(ChatColor.YELLOW + "[KHOPE-MINING] debug OFF");
++                return true;
++            case "status": {
++                org.bukkit.block.Block target = bukkitPlayer.getTargetBlock((java.util.HashSet<Byte>) null, 5);
++                Block nmsBlock = null;
++                if (target != null && target.getType() != Material.AIR) {
++                    nmsBlock = CraftMagicNumbers.getBlock(target.getType());
++                }
++                SparrowDebugHelper.sendStatus(nmsPlayer, nmsPlayer.bZ(), nmsBlock,
++                        target == null ? null : target.getType().name());
++                return true;
++            }
++            case "sim": {
++                if (args.length < 4) {
++                    sender.sendMessage(ChatColor.RED + "Usage : /khope mining debug sim <MATERIAL>");
++                    return true;
++                }
++                Material mat;
++                try {
++                    mat = Material.valueOf(args[3].toUpperCase());
++                } catch (IllegalArgumentException e) {
++                    sender.sendMessage(ChatColor.RED + "Materiau inconnu : " + args[3]);
++                    return true;
++                }
++                Block nmsBlock = CraftMagicNumbers.getBlock(mat);
++                if (nmsBlock == null) {
++                    sender.sendMessage(ChatColor.RED + "Materiau non bloc : " + mat.name());
++                    return true;
++                }
++                SparrowDebugHelper.sendStatus(nmsPlayer, nmsPlayer.bZ(), nmsBlock, mat.name());
++                return true;
++            }
++            default:
++                sendUsage(sender);
++                return true;
++        }
++    }
++
++    private void sendUsage(CommandSender sender) {
++        sender.sendMessage(ChatColor.GOLD + "/khope mining debug on|off|status|sim <MATERIAL>");
++        sender.sendMessage(ChatColor.GOLD + "/khope mining reload");
++    }
++
++    @Override
++    public List<String> tabComplete(CommandSender sender, String alias, String[] args) {
++        if (!sender.isOp()) return java.util.Collections.emptyList();
++        if (args.length == 1) return Arrays.asList("mining");
++        if (args.length == 2) return Arrays.asList("debug", "reload");
++        if (args.length == 3 && "debug".equalsIgnoreCase(args[1])) {
++            return Arrays.asList("on", "off", "status", "sim");
++        }
++        return java.util.Collections.emptyList();
++    }
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/SparrowDebugHelper.java b/src/main/java/com/hpfxd/pandaspigot/util/SparrowDebugHelper.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..056630463dffe65a10870e3dfd1c43bccfa73eaa
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/util/SparrowDebugHelper.java
+@@ -0,0 +1,147 @@
++package com.hpfxd.pandaspigot.util;
++
++import org.bukkit.ChatColor;
++
++import com.hpfxd.pandaspigot.config.SparrowMiningConfig;
++import com.hpfxd.pandaspigot.config.SparrowMiningConfig.BlockOverride;
++import com.hpfxd.pandaspigot.config.SparrowMiningConfig.MiningProfile;
++
++import net.minecraft.server.Block;
++import net.minecraft.server.BlockPosition;
++import net.minecraft.server.ChatComponentText;
++import net.minecraft.server.EnchantmentManager;
++import net.minecraft.server.EntityPlayer;
++import net.minecraft.server.ItemStack;
++import net.minecraft.server.MobEffectList;
++import net.minecraft.server.PacketPlayOutChat;
++
++/**
++ * Affichage de debug pour le minage custom V7. Stateless : uniquement lecture + envoi de packets.
++ *
++ * - chat        : breakdown initial et confirmation de casse
++ * - action bar  : progression tick par tick (PacketPlayOutChat byte 2)
++ */
++public final class SparrowDebugHelper {
++
++    private static final String PREFIX = ChatColor.GOLD + "[" + ChatColor.YELLOW + "KHOPE-MINING" + ChatColor.GOLD + "] ";
++
++    private SparrowDebugHelper() {}
++
++    public static void sendChat(EntityPlayer player, String message) {
++        if (player == null || player.playerConnection == null) return;
++        player.playerConnection.sendPacket(new PacketPlayOutChat(new ChatComponentText(message), (byte) 0));
++    }
++
++    public static void sendActionBar(EntityPlayer player, String message) {
++        if (player == null || player.playerConnection == null) return;
++        player.playerConnection.sendPacket(new PacketPlayOutChat(new ChatComponentText(message), (byte) 2));
++    }
++
++    public static void onMiningTick(EntityPlayer player, int tick, int targetTicks, int stage) {
++        if (player == null) return;
++        int remainingTicks = Math.max(0, targetTicks - tick);
++        int pct = targetTicks > 0 ? (int) Math.floor(100.0 * tick / targetTicks) : 0;
++        String msg = ChatColor.GOLD + "[Mining] "
++                + ChatColor.GRAY + "tick " + ChatColor.YELLOW + tick + ChatColor.GRAY + "/" + ChatColor.GREEN + targetTicks
++                + ChatColor.GRAY + " | stage " + ChatColor.YELLOW + stage
++                + ChatColor.GRAY + " | " + pct + "%"
++                + ChatColor.GRAY + " | restant " + ChatColor.GREEN + (remainingTicks * 50) + "ms";
++        sendActionBar(player, msg);
++    }
++
++    public static void onMiningBreak(EntityPlayer player, int ticks, String trigger) {
++        if (player == null) return;
++        String msg = PREFIX + ChatColor.GREEN + "Casse "
++                + ChatColor.GRAY + "en " + ChatColor.GREEN + ticks + " ticks "
++                + ChatColor.GRAY + "(" + (ticks * 50) + "ms) - earlyBreak: " + ChatColor.GREEN + trigger;
++        sendChat(player, msg);
++    }
++
++    /**
++     * Format complet "status" : outil en main + bloc pointe + formule.
++     * Utilise par /khope mining debug status et /khope mining debug sim.
++     *
++     * @param block  bloc analyse (target ou simulation), peut etre null
++     * @param simulatedMaterialName nom du materiau pour la simulation (ou null si bloc reel)
++     */
++    public static void sendStatus(EntityPlayer player, ItemStack itemInHand, Block block, String simulatedMaterialName) {
++        if (player == null) return;
++        String sparrowId = SparrowItem.getCustomId(itemInHand);
++        MiningProfile profile = SparrowMiningRegistry.getProfile(sparrowId);
++
++        StringBuilder sb = new StringBuilder();
++        sb.append(PREFIX).append(ChatColor.GRAY).append("Outil: ");
++        if (profile == null) {
++            sb.append(ChatColor.RED).append("vanilla / non configure");
++            if (sparrowId != null) sb.append(ChatColor.GRAY).append(" (id=").append(sparrowId).append(")");
++            sendChat(player, sb.toString());
++            return;
++        }
++        sb.append(ChatColor.YELLOW).append(sparrowId)
++          .append(ChatColor.GRAY).append(" (rarityBonus=").append(ChatColor.GREEN).append(profile.rarityBonus).append(ChatColor.GRAY).append(")");
++        sendChat(player, sb.toString());
++
++        if (block == null) {
++            sendChat(player, PREFIX + ChatColor.GRAY + "Bloc: " + ChatColor.RED + "(non vise)");
++            return;
++        }
++
++        float vanillaHardness = block.g(player.world, BlockPosition.ZERO);
++        float customHardness = SparrowMiningRegistry.getCustomHardness(block);
++        String matName = simulatedMaterialName;
++        if (matName == null) {
++            try {
++                org.bukkit.Material m = org.bukkit.craftbukkit.util.CraftMagicNumbers.getMaterial(block);
++                matName = m == null ? "?" : m.name();
++            } catch (Throwable t) { matName = "?"; }
++        }
++        float hardnessUsed = customHardness > 0.0f ? customHardness : vanillaHardness;
++
++        sendChat(player, PREFIX + ChatColor.GRAY + "Bloc: " + ChatColor.YELLOW + matName
++                + ChatColor.GRAY + " (h=" + ChatColor.GREEN + vanillaHardness + ChatColor.GRAY + ", hardnessOverride: "
++                + (customHardness > 0.0f ? (ChatColor.AQUA + String.valueOf(customHardness)) : (ChatColor.RED + "none"))
++                + ChatColor.GRAY + ")");
++
++        // formule
++        float base = player.inventory.a(block);
++        float f = base + profile.rarityBonus;
++        int effLevel = EnchantmentManager.getDigSpeedEnchantmentLevel(player);
++        float fAfterEff = SparrowMiningRegistry.applyCustomEfficiency(f, effLevel);
++        int hasteLevel = player.hasEffect(MobEffectList.FASTER_DIG)
++            ? player.getEffect(MobEffectList.FASTER_DIG).getAmplifier() + 1 : 0;
++        float fFinal = hasteLevel > 0
++            ? SparrowMiningRegistry.applyCustomHaste(fAfterEff, hasteLevel) : fAfterEff;
++
++        float perTick = hardnessUsed > 0 ? fFinal / hardnessUsed / 30.0f : 0.0f;
++        int naturalTicks = perTick > 0 ? (int) Math.ceil(1.0 / perTick) : Integer.MAX_VALUE;
++        int targetTicks = SparrowMiningRegistry.computeSessionTicks(profile, block, perTick);
++
++        sendChat(player, PREFIX + ChatColor.GRAY + "Formule:");
++        sendChat(player, ChatColor.GRAY + "  base   = " + ChatColor.YELLOW + base);
++        sendChat(player, ChatColor.GRAY + "  +rarity= " + ChatColor.GREEN + profile.rarityBonus
++                + ChatColor.GRAY + "  => " + f + ChatColor.GRAY + " sans eff");
++        sendChat(player, ChatColor.GRAY + "  +Eff " + effLevel + " = " + ChatColor.GREEN + (fAfterEff - f)
++                + ChatColor.GRAY + "  => f sans haste = " + ChatColor.GREEN + fAfterEff);
++        if (hasteLevel > 0) {
++            sendChat(player, ChatColor.GRAY + "  haste " + hasteLevel + " => f = " + ChatColor.GREEN + fFinal);
++        }
++        sendChat(player, ChatColor.GRAY + "  perTick = " + fFinal + "/" + hardnessUsed + "/30 = " + ChatColor.GREEN + perTick);
++        sendChat(player, ChatColor.GRAY + "  ticks naturels = " + ChatColor.GREEN + naturalTicks);
++
++        BlockOverride ov = null;
++        if (profile.blockOverrides != null && matName != null) ov = profile.blockOverrides.get(matName);
++        if (ov != null && (ov.minTicks > 0 || ov.maxTicks > 0)) {
++            sendChat(player, ChatColor.GRAY + "  blockOverride " + matName + " minTicks=" + ov.minTicks
++                    + " maxTicks=" + ov.maxTicks + " => forced = " + ChatColor.GREEN + targetTicks);
++        } else {
++            SparrowMiningConfig cfg = SparrowMiningConfig.get();
++            boolean preventInst = cfg != null && cfg.haste != null && cfg.haste.preventInstantBreak;
++            if (preventInst && naturalTicks < 2) {
++                sendChat(player, ChatColor.GRAY + "  preventInstantBreak => clamp >= 2 => " + ChatColor.GREEN + targetTicks);
++            }
++        }
++
++        sendChat(player, PREFIX + ChatColor.GRAY + "earlyBreak: " + ChatColor.GREEN + profile.earlyBreakMode
++                + ChatColor.GRAY + " | duree estimee: " + ChatColor.GREEN + (targetTicks * 50) + "ms");
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/DedicatedServer.java b/src/main/java/net/minecraft/server/DedicatedServer.java
+index b3f0346c10a9c92171e1efd0d9303409d8802008..f738836926d4e45ededeb9399e9f2f4915251ce4 100644
+--- a/src/main/java/net/minecraft/server/DedicatedServer.java
++++ b/src/main/java/net/minecraft/server/DedicatedServer.java
+@@ -221,6 +221,8 @@ public class DedicatedServer extends MinecraftServer implements IMinecraftServer
+             org.github.paperspigot.PaperSpigotConfig.init((File) options.valueOf("paper-settings"));
+             org.github.paperspigot.PaperSpigotConfig.registerCommands();
+             // PaperSpigot end
++            // SparrowItem V7 - register /khope command at boot
++            this.server.getCommandMap().register("khope", "Sparrow", new com.hpfxd.pandaspigot.command.KhopeMiningCommand());
+ 
+             DedicatedServer.LOGGER.info("Generating keypair");
+             this.a(MinecraftEncryption.b());
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index f22942f29b7ecfc39456e203704d6a1491b784d8..7f931678ed4ee946f7ed64a3d9571d59148d9757 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -779,6 +779,8 @@ public final class CraftServer implements Server {
+         resetRecipes();
+         org.spigotmc.SpigotConfig.registerCommands(); // Spigot
+         org.github.paperspigot.PaperSpigotConfig.registerCommands(); // PaperSpigot
++        // SparrowItem V7 - register /khope command
++        commandMap.register("khope", "Sparrow", new com.hpfxd.pandaspigot.command.KhopeMiningCommand());
+ 
+         overrideAllCommandBlockCommands = commandsConfiguration.getStringList("command-block-overrides").contains("*");
+ 

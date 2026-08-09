@@ -1,0 +1,238 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KHopeSpigot <noreply@localhost>
+Date: Tue, 28 Jul 2026 10:53:00 +0200
+Subject: [PATCH] KHopeSpigot: block command and plugin enumeration
+
+Protect protocol-47 tab completion independently of plugin completers: honor
+cancelled async events, hide help/plugin indexes and command namespaces, and
+recheck root suggestions against their registered command permission. Keep
+argument completions intact. Operators may grant the explicit
+pandaspigot.command-enumeration.bypass permission for diagnostics.
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -2036,10 +2036,21 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+         BlockPosition blockpos = packetplayintabcomplete.b();
+         String buffer = packetplayintabcomplete.a();
+         boolean isCommand = buffer.startsWith("/");
++        boolean enumerationBypass = this.getPlayer().hasPermission(
++                org.bukkit.command.defaults.HelpCommand.COMMAND_ENUMERATION_BYPASS);
++        if (!enumerationBypass && isSensitiveHelpCompletionRequest(buffer)) {
++            this.player.playerConnection.sendPacket(new PacketPlayOutTabComplete(new String[0]));
++            return;
++        }
+         event = new com.destroystokyo.paper.event.server.AsyncTabCompleteEvent(this.getPlayer(), completions,
+             buffer, isCommand, blockpos != null ? new Location(player.world.getWorld(), blockpos.getX(), blockpos.getY(), blockpos.getZ()) : null);
+         event.callEvent();
+-        completions = event.isCancelled() ? com.google.common.collect.ImmutableList.of() : event.getCompletions();
++        if (event.isCancelled()) {
++            this.player.playerConnection.sendPacket(new PacketPlayOutTabComplete(new String[0]));
++            return;
++        }
++
++        completions = event.getCompletions();
+         if (!event.isHandled()) {
+             // If the event isn't handled, we can assume that we have no completions, and so we'll ask the server
+ 
+@@ -2055,14 +2066,93 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+             } catch (InterruptedException | ExecutionException e1) {
+                 e1.printStackTrace();
+             }
+-
+-            this.player.playerConnection.sendPacket(new PacketPlayOutTabComplete(completions.toArray(new String[0])));
+-        } else if (!event.isCancelled()) {
+-            this.player.playerConnection.sendPacket(new PacketPlayOutTabComplete(completions.toArray(new String[0])));
+         }
++        completions = sanitizeCommandCompletions(enumerationBypass, buffer, completions);
++        final org.bukkit.entity.Player bukkitPlayer = this.getPlayer();
++        completions = filterAuthorizedRootCommandCompletions(
++                enumerationBypass, buffer, completions, label -> {
++                    org.bukkit.command.Command command =
++                            server.getCommandMap().getCommand(label);
++                    return command != null && command.testPermissionSilent(bukkitPlayer);
++                });
++        this.player.playerConnection.sendPacket(
++                new PacketPlayOutTabComplete(completions.toArray(new String[0])));
+         // PandaSpigot end
+     }
+ 
++    static java.util.List<String> sanitizeCommandCompletions(
++            boolean enumerationBypass, String buffer, java.util.List<String> completions) {
++        if (enumerationBypass || buffer == null || !buffer.startsWith("/")
++                || buffer.indexOf(' ') >= 0 || completions == null || completions.isEmpty()) {
++            return completions == null
++                    ? com.google.common.collect.ImmutableList.<String>of()
++                    : completions;
++        }
++
++        java.util.List<String> sanitized = new java.util.ArrayList<>(completions.size());
++        for (String completion : completions) {
++            if (completion == null) {
++                continue;
++            }
++            String command = completion.startsWith("/")
++                    ? completion.substring(1)
++                    : completion;
++            int whitespace = command.indexOf(' ');
++            String label = whitespace < 0 ? command : command.substring(0, whitespace);
++            if (label.indexOf(':') < 0) {
++                sanitized.add(completion);
++            }
++        }
++        return sanitized;
++    }
++
++    static java.util.List<String> filterAuthorizedRootCommandCompletions(
++            boolean enumerationBypass, String buffer, java.util.List<String> completions,
++            java.util.function.Predicate<String> isAuthorized) {
++        if (enumerationBypass || buffer == null || !buffer.startsWith("/")
++                || buffer.indexOf(' ') >= 0 || completions == null || completions.isEmpty()) {
++            return completions == null
++                    ? com.google.common.collect.ImmutableList.<String>of()
++                    : completions;
++        }
++
++        java.util.List<String> authorized = new java.util.ArrayList<>(completions.size());
++        for (String completion : completions) {
++            if (completion == null) {
++                continue;
++            }
++            String label = completion.startsWith("/")
++                    ? completion.substring(1)
++                    : completion;
++            int whitespace = label.indexOf(' ');
++            if (whitespace >= 0) {
++                label = label.substring(0, whitespace);
++            }
++            if (isAuthorized.test(label)) {
++                authorized.add(completion);
++            }
++        }
++        return authorized;
++    }
++
++    static boolean isSensitiveHelpCompletionRequest(String buffer) {
++        if (buffer == null) {
++            return false;
++        }
++        String normalized = buffer.trim().toLowerCase(java.util.Locale.ROOT);
++        if (!normalized.startsWith("/")) {
++            return false;
++        }
++        normalized = normalized.substring(1);
++        int whitespace = normalized.indexOf(' ');
++        String label = whitespace < 0 ? normalized : normalized.substring(0, whitespace);
++        int namespace = label.lastIndexOf(':');
++        if (namespace >= 0) {
++            label = label.substring(namespace + 1);
++        }
++        return "?".equals(label) || "help".equals(label);
++    }
++
+     public void a(PacketPlayInSettings packetplayinsettings) {
+         PlayerConnectionUtils.ensureMainThread(packetplayinsettings, this, this.player.u());
+         this.player.a(packetplayinsettings);
+diff --git a/src/main/java/org/bukkit/craftbukkit/help/SimpleHelpMap.java b/src/main/java/org/bukkit/craftbukkit/help/SimpleHelpMap.java
+--- a/src/main/java/org/bukkit/craftbukkit/help/SimpleHelpMap.java
++++ b/src/main/java/org/bukkit/craftbukkit/help/SimpleHelpMap.java
+@@ -6,6 +6,7 @@ import com.google.common.collect.Collections2;
+ 
+ import org.bukkit.command.*;
+ import org.bukkit.command.defaults.BukkitCommand;
++import org.bukkit.command.defaults.HelpCommand;
+ import org.bukkit.command.defaults.VanillaCommand;
+ import org.bukkit.craftbukkit.CraftServer;
+ import org.bukkit.craftbukkit.command.VanillaCommandWrapper;
+@@ -151,7 +152,9 @@ public class SimpleHelpMap implements HelpMap {
+         fillPluginIndexes(pluginIndexes, server.getCommandMap().getCommands());
+ 
+         for (Map.Entry<String, Set<HelpTopic>> entry : pluginIndexes.entrySet()) {
+-            addTopic(new IndexHelpTopic(entry.getKey(), "All commands for " + entry.getKey(), null, entry.getValue(), "Below is a list of all " + entry.getKey() + " commands:"));
++            addTopic(new IndexHelpTopic(entry.getKey(), "All commands for " + entry.getKey(),
++                    HelpCommand.COMMAND_ENUMERATION_BYPASS, entry.getValue(),
++                    "Below is a list of all " + entry.getKey() + " commands:"));
+         }
+ 
+         // Amend help topics from the help.yml file
+diff --git a/src/test/java/net/minecraft/server/PlayerConnectionCommandCompletionTest.java b/src/test/java/net/minecraft/server/PlayerConnectionCommandCompletionTest.java
+new file mode 100644
+index 000000000..58135cdf7
+--- /dev/null
++++ b/src/test/java/net/minecraft/server/PlayerConnectionCommandCompletionTest.java
+@@ -0,0 +1,74 @@
++package net.minecraft.server;
++
++import static org.junit.Assert.assertEquals;
++
++import java.util.Arrays;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Set;
++
++import org.junit.Test;
++
++public class PlayerConnectionCommandCompletionTest {
++
++    @Test
++    public void removesPluginNamespaceFromRootCompletion() {
++        List<String> result = PlayerConnection.sanitizeCommandCompletions(
++                false, "/", Arrays.asList("/jobs", "/kcraft:kcraft", "/bukkit:help"));
++
++        assertEquals(Arrays.asList("/jobs"), result);
++    }
++
++    @Test
++    public void bypassPreservesDiagnosticNamespaces() {
++        List<String> input = Arrays.asList("/jobs", "/kcraft:kcraft");
++
++        assertEquals(input, PlayerConnection.sanitizeCommandCompletions(
++                true, "/", input));
++    }
++
++    @Test
++    public void doesNotStripNamespacedArgumentValues() {
++        List<String> input = Arrays.asList("minecraft:stone", "volkaria:azurite");
++
++        assertEquals(input, PlayerConnection.sanitizeCommandCompletions(
++                false, "/give Player ", input));
++    }
++
++    @Test
++    public void handlesNullCompletionListAsEmpty() {
++        assertEquals(0, PlayerConnection.sanitizeCommandCompletions(
++                false, "/", null).size());
++    }
++
++    @Test
++    public void rootCompletionRechecksActualCommandPermission() {
++        final Set<String> authorized = new HashSet<>(
++                Arrays.asList("jobs", "/cancel"));
++        List<String> result = PlayerConnection.filterAuthorizedRootCommandCompletions(
++                false, "/", Arrays.asList("/jobs", "/ban", "//cancel"),
++                authorized::contains);
++
++        assertEquals(Arrays.asList("/jobs", "//cancel"), result);
++    }
++
++    @Test
++    public void permissionFilterDoesNotTouchArgumentCompletion() {
++        List<String> input = Arrays.asList("PlayerOne", "PlayerTwo");
++
++        assertEquals(input, PlayerConnection.filterAuthorizedRootCommandCompletions(
++                false, "/msg ", input, label -> false));
++    }
++
++    @Test
++    public void recognizesHelpAliasesAndNamespacesCaseInsensitively() {
++        assertEquals(true, PlayerConnection.isSensitiveHelpCompletionRequest("/? "));
++        assertEquals(true, PlayerConnection.isSensitiveHelpCompletionRequest("/HELP "));
++        assertEquals(true, PlayerConnection.isSensitiveHelpCompletionRequest(
++                "/bukkit:help topic"));
++        assertEquals(true, PlayerConnection.isSensitiveHelpCompletionRequest(
++                "/minecraft:? "));
++        assertEquals(false, PlayerConnection.isSensitiveHelpCompletionRequest("/jobs "));
++        assertEquals(false, PlayerConnection.isSensitiveHelpCompletionRequest("help "));
++    }
++}
+-- 
+2.45.2.windows.1

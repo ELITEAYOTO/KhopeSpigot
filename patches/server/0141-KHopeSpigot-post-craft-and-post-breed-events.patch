@@ -1,0 +1,99 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Tue, 28 Jul 2026 17:09:47 +0200
+Subject: [PATCH] KHopeSpigot: emit post-craft and post-breed events
+
+
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalBreed.java b/src/main/java/net/minecraft/server/PathfinderGoalBreed.java
+index cdff6d2adf2683e856157febff763e88ee3cb2d2..9789fb8ffa9393efc81a1af4c1eea089a4fce220 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalBreed.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalBreed.java
+@@ -94,7 +94,20 @@ public class PathfinderGoalBreed extends PathfinderGoal {
+             this.e.cs();
+             entityageable.setAgeRaw(-24000);
+             entityageable.setPositionRotation(this.d.locX, this.d.locY, this.d.locZ, 0.0F, 0.0F);
+-            this.a.addEntity(entityageable, org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.BREEDING); // CraftBukkit - added SpawnReason
++            boolean childSpawned = this.a.addEntity(entityageable,
++                    org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.BREEDING); // CraftBukkit - added SpawnReason
++            if (childSpawned && entityhuman != null
++                    && entityhuman.getBukkitEntity() instanceof org.bukkit.entity.Player
++                    && this.d.getBukkitEntity() instanceof org.bukkit.entity.Animals
++                    && this.e.getBukkitEntity() instanceof org.bukkit.entity.Animals
++                    && entityageable.getBukkitEntity() instanceof org.bukkit.entity.Ageable) {
++                this.a.getServer().getPluginManager().callEvent(
++                        new com.hpfxd.pandaspigot.event.entity.PostEntityBreedEvent(
++                                (org.bukkit.entity.Player) entityhuman.getBukkitEntity(),
++                                (org.bukkit.entity.Animals) this.d.getBukkitEntity(),
++                                (org.bukkit.entity.Animals) this.e.getBukkitEntity(),
++                                (org.bukkit.entity.Ageable) entityageable.getBukkitEntity()));
++            }
+             Random random = this.d.bc();
+ 
+             for (int i = 0; i < 7; ++i) {
+diff --git a/src/main/java/net/minecraft/server/SlotResult.java b/src/main/java/net/minecraft/server/SlotResult.java
+index 296de4261ba74a85590ccdd4b3f1a1c57218c490..b7eb20657693979cba998b39ed6b1b259449ce74 100644
+--- a/src/main/java/net/minecraft/server/SlotResult.java
++++ b/src/main/java/net/minecraft/server/SlotResult.java
+@@ -1,5 +1,9 @@
+ package net.minecraft.server;
+ 
++import com.hpfxd.pandaspigot.event.inventory.PostCraftItemEvent;
++import org.bukkit.craftbukkit.inventory.CraftItemStack;
++import org.bukkit.inventory.Recipe;
++
+ public class SlotResult extends Slot {
+ 
+     private final InventoryCrafting a;
+@@ -87,6 +91,14 @@ public class SlotResult extends Slot {
+ 
+     @Override
+     public void a(EntityHuman entityhuman, ItemStack itemstack) {
++        int craftedAmount = this.c;
++        Recipe completedRecipe = this.a.currentRecipe == null
++                ? null : this.a.currentRecipe.toBukkitRecipe();
++        org.bukkit.inventory.ItemStack craftedResult =
++                toCraftedResult(itemstack, craftedAmount);
++        org.bukkit.inventory.ItemStack[] matrixBefore =
++                snapshotMatrix(this.a);
++
+         this.c(itemstack);
+         ItemStack[] aitemstack = CraftingManager.getInstance().b(this.a, entityhuman.world);
+ 
+@@ -107,5 +119,37 @@ public class SlotResult extends Slot {
+             }
+         }
+ 
++        if (completedRecipe != null && craftedResult != null
++                && entityhuman.getBukkitEntity() instanceof org.bukkit.entity.Player) {
++            entityhuman.world.getServer().getPluginManager().callEvent(
++                    new PostCraftItemEvent(
++                            (org.bukkit.entity.Player) entityhuman.getBukkitEntity(),
++                            completedRecipe, craftedResult, matrixBefore));
++        }
++    }
++
++    private static org.bukkit.inventory.ItemStack toCraftedResult(
++            ItemStack result, int craftedAmount) {
++        if (result == null || result.getItem() == null || craftedAmount <= 0) {
++            return null;
++        }
++        org.bukkit.inventory.ItemStack bukkit = CraftItemStack.asBukkitCopy(result);
++        if (bukkit == null || bukkit.getTypeId() <= 0) {
++            return null;
++        }
++        bukkit.setAmount(craftedAmount);
++        return bukkit;
++    }
++
++    private static org.bukkit.inventory.ItemStack[] snapshotMatrix(
++            InventoryCrafting matrix) {
++        org.bukkit.inventory.ItemStack[] snapshot =
++                new org.bukkit.inventory.ItemStack[matrix.getSize()];
++        for (int i = 0; i < snapshot.length; i++) {
++            ItemStack ingredient = matrix.getItem(i);
++            snapshot[i] = ingredient == null
++                    ? null : CraftItemStack.asBukkitCopy(ingredient);
++        }
++        return snapshot;
+     }
+ }

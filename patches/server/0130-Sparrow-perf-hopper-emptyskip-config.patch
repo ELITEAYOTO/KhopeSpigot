@@ -1,0 +1,190 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Sat, 30 May 2026 12:00:00 +0200
+Subject: [PATCH] Sparrow perf: hopper empty skip + config infrastructure
+
+Ajoute SparrowPerfConfig (sparrow-perf.yml) avec une optimisation
+desactivee par defaut (safe deploy) :
+
+1. TileEntityHopper.m() - hopper.emptySkip :
+   Lorsque l inventaire du hopper est completement vide, ajoute
+   hopperEmptySkip ticks supplementaires au cooldown spigot standard.
+   0 = comportement vanilla (desactive par defaut).
+   Recommande pour serveurs factions/farm : 16
+   (cooldown 8 puis 24 ticks pour les hoppers inactifs, 3x moins de ticks).
+
+2. Infrastructure CLI + init :
+   - Main.java : option --sparrow-perf pour specifier le fichier YAML.
+   - DedicatedServer.java : SparrowPerfConfig.init() apres SparrowCropsConfig.
+
+Gains attendus avec hopperEmptySkip=16 sur serveur farm-heavy :
+   -5 a -15% CPU total (hoppers inactifs tickent 3x moins souvent).
+   Le gain est proportionnel au nombre de hoppers vides en permanence.
+
+Voir patch 0131 pour l optimisation Explosion.java (ray step).
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/SparrowPerfConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/SparrowPerfConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..738a3a96f26e8ef2f073293ea012224c79e653c2
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/config/SparrowPerfConfig.java
+@@ -0,0 +1,111 @@
++package com.hpfxd.pandaspigot.config;
++
++import java.io.File;
++import java.util.logging.Logger;
++
++import org.spongepowered.configurate.CommentedConfigurationNode;
++import org.spongepowered.configurate.objectmapping.ConfigSerializable;
++import org.spongepowered.configurate.objectmapping.ObjectMapper;
++import org.spongepowered.configurate.objectmapping.meta.Comment;
++import org.spongepowered.configurate.util.MapFactories;
++import org.spongepowered.configurate.util.NamingSchemes;
++
++import com.google.common.base.Throwables;
++import com.hpfxd.configurate.eoyaml.EOYamlConfigurationLoader;
++
++/**
++ * SparrowMC performance configuration — loaded from sparrow-perf.yml.
++ *
++ * Covers:
++ *   - Hopper: extended cooldown when hopper inventory is empty (reduces idle tick cost).
++ *   - Explosion: configurable sphere ray sampling step (reduces ray-cast cost per explosion).
++ *
++ * All defaults reproduce vanilla/Spigot behavior.
++ * Set sparrow-perf.yml values after testing; revert by deleting the file or patch 0130/0131.
++ */
++@ConfigSerializable
++@SuppressWarnings({"FieldCanBeLocal", "FieldMayBeFinal"})
++public class SparrowPerfConfig {
++
++    private static final Logger LOGGER = Logger.getLogger("Minecraft");
++    private static SparrowPerfConfig config;
++
++    // --- Cached static fields for per-tick performance ---
++
++    /** Extra ticks on top of spigot hopperCheck when hopper is empty. 0 = disabled (vanilla). */
++    public static int hopperEmptySkip  = 0;
++
++    /** Explosion sphere ray step. 1 = vanilla (1352 rays). 2 = ~78% less. Default: 1. */
++    public static int explosionRayStep = 1;
++
++    // --- Initialisation ---
++
++    public static void init(File file) {
++        EOYamlConfigurationLoader loader = EOYamlConfigurationLoader.builder()
++                .file(file)
++                .defaultOptions(o -> o
++                        .header("SparrowMC performance configuration.\n" +
++                                "All defaults reproduce vanilla/Spigot behavior (safe to deploy as-is).\n" +
++                                "\n" +
++                                "hopper:\n" +
++                                "  emptySkip — extra ticks added to the hopperCheck cooldown when\n" +
++                                "              the hopper inventory is completely empty and nothing transferred.\n" +
++                                "              0 = disabled (vanilla behavior).\n" +
++                                "              Total cooldown = spigot hopperCheck + emptySkip.\n" +
++                                "              Recommended for factions/farm servers: 16\n" +
++                                "              (cooldown becomes 8+16=24 ticks instead of 8 for idle hoppers).\n" +
++                                "\n" +
++                                "explosion:\n" +
++                                "  rayStep — sampling step for explosion sphere ray casting.\n" +
++                                "            1 = vanilla (1352 rays per explosion).\n" +
++                                "            2 = ~296 rays (~78% reduction, imperceptible on blocks).\n" +
++                                "            3 = ~150 rays (~89% reduction, slight edge inaccuracy).\n" +
++                                "            Recommended for factions/cannon servers: 2.")
++                        .mapFactory(MapFactories.insertionOrdered())
++                        .serializers(build -> build.registerAnnotatedObjects(ObjectMapper.factoryBuilder()
++                                .defaultNamingScheme(NamingSchemes.CAMEL_CASE)
++                                .build())))
++                .build();
++
++        try {
++            CommentedConfigurationNode root = loader.load();
++            config = root.get(SparrowPerfConfig.class);
++            root.set(config);
++            loader.save(root);
++            cacheFields(config);
++            LOGGER.info("[SparrowPerf] Configuration chargee depuis " + file.getName() + ".");
++        } catch (Exception e) {
++            throw Throwables.propagate(e);
++        }
++    }
++
++    private static void cacheFields(SparrowPerfConfig cfg) {
++        hopperEmptySkip  = Math.max(0, cfg.hopper.emptySkip);
++        explosionRayStep = Math.max(1, Math.min(8, cfg.explosion.rayStep));
++    }
++
++    // --- Structure de configuration ---
++
++    @Comment("Hopper performance settings")
++    public HopperConfig hopper = new HopperConfig();
++
++    @Comment("Explosion performance settings")
++    public ExplosionConfig explosion = new ExplosionConfig();
++
++    // --- Classes internes ---
++
++    @ConfigSerializable
++    public static class HopperConfig {
++        @Comment("Extra ticks added to hopperCheck cooldown when hopper inventory is empty.\n" +
++                 "0 = disabled (vanilla). Recommended: 16.")
++        public int emptySkip = 0;
++    }
++
++    @ConfigSerializable
++    public static class ExplosionConfig {
++        @Comment("Explosion sphere ray sampling step.\n" +
++                 "1 = vanilla (1352 rays). 2 = 78% reduction (~296 rays). 3 = 89% reduction.\n" +
++                 "Recommended for factions: 2.")
++        public int rayStep = 1;
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/DedicatedServer.java b/src/main/java/net/minecraft/server/DedicatedServer.java
+index 1c1cef2de174a919f0e6e3fb7863aa817a880b69..d66ced7c0a50a4533a27554b85492f60d4a00aa7 100644
+--- a/src/main/java/net/minecraft/server/DedicatedServer.java
++++ b/src/main/java/net/minecraft/server/DedicatedServer.java
+@@ -216,6 +216,7 @@ public class DedicatedServer extends MinecraftServer implements IMinecraftServer
+             com.hpfxd.pandaspigot.config.SparrowArmorConfig.init((File) options.valueOf("sparrow-armor"));
+             com.hpfxd.pandaspigot.config.SparrowItemsConfig.init((File) options.valueOf("sparrow-items"));
+             com.hpfxd.pandaspigot.config.SparrowCropsConfig.init((File) options.valueOf("sparrow-crops"));
++            com.hpfxd.pandaspigot.config.SparrowPerfConfig.init((File) options.valueOf("sparrow-perf"));
+             // SparrowItem end
+             // PandaSpigot end
+             // PaperSpigot start
+diff --git a/src/main/java/net/minecraft/server/TileEntityHopper.java b/src/main/java/net/minecraft/server/TileEntityHopper.java
+index 760a0767eae7c148efd27c78a4a2f142507b75b7..023c1aa9fd7f36f9fd3207fd1f4a652ccf920fe1 100644
+--- a/src/main/java/net/minecraft/server/TileEntityHopper.java
++++ b/src/main/java/net/minecraft/server/TileEntityHopper.java
+@@ -201,7 +201,13 @@ public class TileEntityHopper extends TileEntityContainer implements IHopper, IU
+             }
+             // PaperSpigot start
+             if (world.paperSpigotConfig.useHopperCheck && !this.n()) {
+-                this.d(world.spigotConfig.hopperCheck);
++                // SparrowPerf start - extended cooldown for empty hoppers
++                int cooldown = world.spigotConfig.hopperCheck;
++                if (com.hpfxd.pandaspigot.config.SparrowPerfConfig.hopperEmptySkip > 0 && this.p()) {
++                    cooldown += com.hpfxd.pandaspigot.config.SparrowPerfConfig.hopperEmptySkip;
++                }
++                this.d(cooldown);
++                // SparrowPerf end
+             }
+             // PaperSpigot end
+             return false;
+diff --git a/src/main/java/org/bukkit/craftbukkit/Main.java b/src/main/java/org/bukkit/craftbukkit/Main.java
+index 92efc52ba8fdd407a9c823acad474d1d183bdc2a..6c0636cec8dd2442152f26a725c033cd9126716d 100644
+--- a/src/main/java/org/bukkit/craftbukkit/Main.java
++++ b/src/main/java/org/bukkit/craftbukkit/Main.java
+@@ -170,6 +170,12 @@ public class Main {
+                         .ofType(File.class)
+                         .defaultsTo(new File("sparrow-crops.yml"))
+                         .describedAs("Yml file");
++
++                acceptsAll(asList("sparrow-perf"), "File for Sparrow performance settings")
++                        .withRequiredArg()
++                        .ofType(File.class)
++                        .defaultsTo(new File("sparrow-perf.yml"))
++                        .describedAs("Yml file");
+                 // SparrowItem end
+ 
+                 acceptsAll(asList("add-plugin", "add-extra-plugin-jar"), "Specify paths to extra plugin jars to be loaded in addition to those in the plugins folder. This argument can be specified multiple times, once for each extra plugin jar path.")

@@ -13,3 +13,8 @@ build/
 /paperclip/bin/
 
 paperclip.jar
+
+# Local BuildTools/Paperclip caches and diagnostic output
+/cache/
+/logs/
+/paperclip.pre-*.jar

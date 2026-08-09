@@ -1,0 +1,150 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Tue, 28 Jul 2026 17:09:02 +0200
+Subject: [PATCH] KHopeSpigot: expose post-craft and post-breed events
+
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/event/entity/PostEntityBreedEvent.java b/src/main/java/com/hpfxd/pandaspigot/event/entity/PostEntityBreedEvent.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..33df6b46716d785b0aadeaaa6a8f9d4267302c2e
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/event/entity/PostEntityBreedEvent.java
+@@ -0,0 +1,57 @@
++package com.hpfxd.pandaspigot.event.entity;
++
++import org.bukkit.entity.Ageable;
++import org.bukkit.entity.Animals;
++import org.bukkit.entity.Player;
++import org.bukkit.event.HandlerList;
++import org.bukkit.event.player.PlayerEvent;
++
++/**
++ * Fired after a vanilla breeding operation has successfully spawned its child.
++ *
++ * <p>Minecraft 1.8 associates the breeding statistic with one responsible
++ * player. This event exposes that same player and never fires if creature
++ * spawning was denied.</p>
++ */
++public final class PostEntityBreedEvent extends PlayerEvent {
++    private static final HandlerList handlers = new HandlerList();
++    private final Animals firstParent;
++    private final Animals secondParent;
++    private final Ageable child;
++
++    public PostEntityBreedEvent(Player breeder, Animals firstParent,
++            Animals secondParent, Ageable child) {
++        super(breeder);
++        if (firstParent == null || secondParent == null || child == null) {
++            throw new IllegalArgumentException("parents and child cannot be null");
++        }
++        this.firstParent = firstParent;
++        this.secondParent = secondParent;
++        this.child = child;
++    }
++
++    public Player getBreeder() {
++        return getPlayer();
++    }
++
++    public Animals getFirstParent() {
++        return firstParent;
++    }
++
++    public Animals getSecondParent() {
++        return secondParent;
++    }
++
++    public Ageable getChild() {
++        return child;
++    }
++
++    @Override
++    public HandlerList getHandlers() {
++        return handlers;
++    }
++
++    public static HandlerList getHandlerList() {
++        return handlers;
++    }
++}
+diff --git a/src/main/java/com/hpfxd/pandaspigot/event/inventory/PostCraftItemEvent.java b/src/main/java/com/hpfxd/pandaspigot/event/inventory/PostCraftItemEvent.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..5384d87969f54e0a7549452933394133fcd5a88e
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/event/inventory/PostCraftItemEvent.java
+@@ -0,0 +1,75 @@
++package com.hpfxd.pandaspigot.event.inventory;
++
++import org.bukkit.entity.Player;
++import org.bukkit.event.HandlerList;
++import org.bukkit.event.player.PlayerEvent;
++import org.bukkit.inventory.ItemStack;
++import org.bukkit.inventory.Recipe;
++
++/**
++ * Fired after one vanilla crafting operation has consumed its ingredients.
++ *
++ * <p>The event is observational and cannot cancel the completed transaction.
++ * Shift-clicking fires one event for every recipe operation that the server
++ * actually commits. Preview changes, denied clicks and crafts that cannot fit
++ * in the destination inventory do not fire it.</p>
++ *
++ * <p>The result amount is the number of output items produced by this single
++ * operation. The matrix is a defensive snapshot taken before consumption.</p>
++ */
++public final class PostCraftItemEvent extends PlayerEvent {
++    private static final HandlerList handlers = new HandlerList();
++    private final Recipe recipe;
++    private final ItemStack result;
++    private final ItemStack[] matrix;
++
++    public PostCraftItemEvent(Player player, Recipe recipe, ItemStack result,
++            ItemStack[] matrix) {
++        super(player);
++        if (recipe == null) {
++            throw new IllegalArgumentException("recipe cannot be null");
++        }
++        if (result == null || result.getTypeId() <= 0 || result.getAmount() <= 0) {
++            throw new IllegalArgumentException("result must be a present item stack");
++        }
++        this.recipe = recipe;
++        this.result = result.clone();
++        this.matrix = cloneMatrix(matrix);
++    }
++
++    public Recipe getRecipe() {
++        return recipe;
++    }
++
++    public ItemStack getResult() {
++        return result.clone();
++    }
++
++    public int getCraftedAmount() {
++        return result.getAmount();
++    }
++
++    public ItemStack[] getMatrix() {
++        return cloneMatrix(matrix);
++    }
++
++    @Override
++    public HandlerList getHandlers() {
++        return handlers;
++    }
++
++    public static HandlerList getHandlerList() {
++        return handlers;
++    }
++
++    private static ItemStack[] cloneMatrix(ItemStack[] source) {
++        if (source == null) {
++            return new ItemStack[0];
++        }
++        ItemStack[] copy = new ItemStack[source.length];
++        for (int i = 0; i < source.length; i++) {
++            copy[i] = source[i] == null ? null : source[i].clone();
++        }
++        return copy;
++    }
++}

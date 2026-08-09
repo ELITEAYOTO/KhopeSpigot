@@ -1,0 +1,349 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Thu, 22 May 2026 12:00:00 +0200
+Subject: [PATCH] Sparrow crops: config autofarm + trample prevention
+
+Ajout de SparrowCropsConfig (sparrow-crops.yml) qui permet :
+
+1. Par culture (melon, pumpkin, wheat, carrot, potato) :
+   - requireLight  : desactive l'obligation de lumiere pour la croissance.
+   - requireWater  : desactive l'obligation de farmland hydrate
+                     (utilise f=4.0, equivalent d'un farmland sature).
+
+2. Melon / Pumpkin uniquement :
+   - airDropEnabled : le stem ejecte les items directement dans la cellule
+                      d'air adjacente au lieu de placer le bloc fruit.
+                      Concu pour les fermes en damier automatiques.
+                      Melon : 3-7 slices ; Pumpkin : 1 pumpkin.
+
+3. Farmland :
+   - preventTrampling : empeche la conversion farmland -> dirt par le
+                        pietinement des entites.
+
+Toutes les options defaut reproduisent le comportement vanilla 1.8.8.
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/SparrowCropsConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/SparrowCropsConfig.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..0000000000000000000000000000000000000000
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/config/SparrowCropsConfig.java
+@@ -0,0 +1,175 @@
++package com.hpfxd.pandaspigot.config;
++
++import java.io.File;
++import java.util.logging.Logger;
++
++import org.spongepowered.configurate.CommentedConfigurationNode;
++import org.spongepowered.configurate.objectmapping.ConfigSerializable;
++import org.spongepowered.configurate.objectmapping.ObjectMapper;
++import org.spongepowered.configurate.objectmapping.meta.Comment;
++import org.spongepowered.configurate.util.MapFactories;
++import org.spongepowered.configurate.util.NamingSchemes;
++
++import com.google.common.base.Throwables;
++import com.hpfxd.configurate.eoyaml.EOYamlConfigurationLoader;
++
++/**
++ * SparrowMC crops configuration — loaded from sparrow-crops.yml.
++ *
++ * Covers:
++ *   - Per-crop light and moisture requirements for growth.
++ *   - Melon/pumpkin air-drop: drop fruit items directly into adjacent air (auto-harvest).
++ *   - Farmland trampling prevention.
++ *
++ * All defaults reproduce vanilla 1.8.8 behavior.
++ */
++@ConfigSerializable
++@SuppressWarnings({"FieldCanBeLocal", "FieldMayBeFinal"})
++public class SparrowCropsConfig {
++
++    private static final Logger LOGGER = Logger.getLogger("Minecraft");
++    private static SparrowCropsConfig config;
++
++    // --- Cached static fields for per-tick performance ---
++
++    public static boolean melonRequireLight    = true;
++    public static boolean melonRequireWater    = true;
++    public static boolean melonAirDropEnabled  = false;
++
++    public static boolean pumpkinRequireLight   = true;
++    public static boolean pumpkinRequireWater   = true;
++    public static boolean pumpkinAirDropEnabled = false;
++
++    public static boolean wheatRequireLight  = true;
++    public static boolean wheatRequireWater  = true;
++
++    public static boolean carrotRequireLight = true;
++    public static boolean carrotRequireWater = true;
++
++    public static boolean potatoRequireLight = true;
++    public static boolean potatoRequireWater = true;
++
++    public static boolean preventTrampling = false;
++
++    // --- Initialisation ---
++
++    public static void init(File file) {
++        EOYamlConfigurationLoader loader = EOYamlConfigurationLoader.builder()
++                .file(file)
++                .defaultOptions(o -> o
++                        .header("SparrowMC crops configuration.\n" +
++                                "Controls growth requirements and special mechanics for farm crops.\n" +
++                                "\n" +
++                                "Per-crop flags (melon, pumpkin, wheat, carrot, potato):\n" +
++                                "  requireLight  — the crop needs block light level >= 9 directly above it to grow.\n" +
++                                "                  Set to false for underground or dimly lit farms. (default: true)\n" +
++                                "  requireWater  — when true, hydrated farmland (moisture > 0) accelerates growth\n" +
++                                "                  via the vanilla multiplier. When false, the formula uses the\n" +
++                                "                  equivalent of fully-hydrated farmland regardless of moisture.\n" +
++                                "                  Crops also survive without light in the 'canSurvive' check.\n" +
++                                "                  (default: true)\n" +
++                                "\n" +
++                                "Stem-only flags (melon, pumpkin):\n" +
++                                "  airDropEnabled — instead of placing a fruit block, the stem drops fruit items\n" +
++                                "                   directly into the adjacent air cell. Enables checkerboard\n" +
++                                "                   auto-harvest farms where 0-slots are pure air.\n" +
++                                "                   Melon: drops 3-7 melon slices. Pumpkin: drops 1 pumpkin.\n" +
++                                "                   (default: false)\n" +
++                                "\n" +
++                                "Farmland:\n" +
++                                "  preventTrampling — prevent entities landing on farmland from converting it\n" +
++                                "                     to dirt. Crops above are protected as a side effect.\n" +
++                                "                     (default: false)")
++                        .mapFactory(MapFactories.insertionOrdered())
++                        .serializers(build -> build.registerAnnotatedObjects(ObjectMapper.factoryBuilder()
++                                .defaultNamingScheme(NamingSchemes.CAMEL_CASE)
++                                .build())))
++                .build();
++
++        try {
++            CommentedConfigurationNode root = loader.load();
++            config = root.get(SparrowCropsConfig.class);
++            root.set(config);
++            loader.save(root);
++            cacheFields(config);
++            LOGGER.info("[SparrowCrops] Configuration chargee depuis " + file.getName() + ".");
++        } catch (Exception e) {
++            throw Throwables.propagate(e);
++        }
++    }
++
++    private static void cacheFields(SparrowCropsConfig cfg) {
++        melonRequireLight    = cfg.melon.requireLight;
++        melonRequireWater    = cfg.melon.requireWater;
++        melonAirDropEnabled  = cfg.melon.airDropEnabled;
++
++        pumpkinRequireLight   = cfg.pumpkin.requireLight;
++        pumpkinRequireWater   = cfg.pumpkin.requireWater;
++        pumpkinAirDropEnabled = cfg.pumpkin.airDropEnabled;
++
++        wheatRequireLight  = cfg.wheat.requireLight;
++        wheatRequireWater  = cfg.wheat.requireWater;
++
++        carrotRequireLight = cfg.carrot.requireLight;
++        carrotRequireWater = cfg.carrot.requireWater;
++
++        potatoRequireLight = cfg.potato.requireLight;
++        potatoRequireWater = cfg.potato.requireWater;
++
++        preventTrampling = cfg.farmland.preventTrampling;
++    }
++
++    // --- Structure de configuration ---
++
++    @Comment("Melon stem configuration")
++    public StemConfig melon = new StemConfig();
++
++    @Comment("Pumpkin stem configuration")
++    public StemConfig pumpkin = new StemConfig();
++
++    @Comment("Wheat configuration")
++    public CropConfig wheat = new CropConfig();
++
++    @Comment("Carrot configuration")
++    public CropConfig carrot = new CropConfig();
++
++    @Comment("Potato configuration")
++    public CropConfig potato = new CropConfig();
++
++    @Comment("Farmland trampling configuration")
++    public FarmlandConfig farmland = new FarmlandConfig();
++
++    // --- Classes internes ---
++
++    @ConfigSerializable
++    public static class CropConfig {
++        @Comment("Require block light level >= 9 above the crop to allow growth")
++        public boolean requireLight = true;
++
++        @Comment("When true (vanilla), hydrated farmland speeds up growth.\n" +
++                 "When false, growth rate is calculated as if farmland is fully hydrated.")
++        public boolean requireWater = true;
++    }
++
++    @ConfigSerializable
++    public static class StemConfig {
++        @Comment("Require block light level >= 9 above the stem to allow growth")
++        public boolean requireLight = true;
++
++        @Comment("When true (vanilla), hydrated farmland speeds up growth.\n" +
++                 "When false, growth rate is calculated as if farmland is fully hydrated.")
++        public boolean requireWater = true;
++
++        @Comment("Drop fruit items into adjacent AIR instead of placing a fruit block.\n" +
++                 "Melon drops 3-7 melon slices; pumpkin drops 1 pumpkin.\n" +
++                 "Ideal for checkerboard auto-harvest farms (X=stem, 0=air drop zone).")
++        public boolean airDropEnabled = false;
++    }
++
++    @ConfigSerializable
++    public static class FarmlandConfig {
++        @Comment("Prevent entities jumping on farmland from converting it back to dirt.\n" +
++                 "Also prevents crops above from breaking as a consequence of trampling.")
++        public boolean preventTrampling = false;
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/BlockCrops.java b/src/main/java/net/minecraft/server/BlockCrops.java
+index f94290593..6230937a9 100644
+--- a/src/main/java/net/minecraft/server/BlockCrops.java
++++ b/src/main/java/net/minecraft/server/BlockCrops.java
+@@ -26,11 +26,26 @@ public class BlockCrops extends BlockPlant implements IBlockFragilePlantElement
+ 
+     public void b(World world, BlockPosition blockposition, IBlockData iblockdata, Random random) {
+         super.b(world, blockposition, iblockdata, random);
+-        if (world.isLightLevel(blockposition.up(), 9)) { // PandaSpigot - Use isLightLevel
++        // SparrowCrops - configurable light and water requirements per crop type
++        boolean requireLight;
++        boolean requireWater;
++        if (this == Blocks.CARROTS) {
++            requireLight = com.hpfxd.pandaspigot.config.SparrowCropsConfig.carrotRequireLight;
++            requireWater = com.hpfxd.pandaspigot.config.SparrowCropsConfig.carrotRequireWater;
++        } else if (this == Blocks.POTATOES) {
++            requireLight = com.hpfxd.pandaspigot.config.SparrowCropsConfig.potatoRequireLight;
++            requireWater = com.hpfxd.pandaspigot.config.SparrowCropsConfig.potatoRequireWater;
++        } else {
++            // WHEAT et sous-classes non reconnues
++            requireLight = com.hpfxd.pandaspigot.config.SparrowCropsConfig.wheatRequireLight;
++            requireWater = com.hpfxd.pandaspigot.config.SparrowCropsConfig.wheatRequireWater;
++        }
++        if (!requireLight || world.isLightLevel(blockposition.up(), 9)) { // PandaSpigot - Use isLightLevel
+             int i = ((Integer) iblockdata.get(BlockCrops.AGE)).intValue();
+ 
+             if (i < 7) {
+-                float f = a((Block) this, world, blockposition);
++                // SparrowCrops - si requireWater=false, utiliser f=4.0 (equivalent farmland hydrate)
++                float f = requireWater ? a((Block) this, world, blockposition) : 4.0F;
+ 
+                 if (random.nextInt((int) (world.growthOdds / world.spigotConfig.wheatModifier * (25.0F / f)) + 1) == 0) { // Spigot                    // CraftBukkit start
+                     IBlockData data = iblockdata.set(AGE, Integer.valueOf(i + 1));
+@@ -100,7 +115,17 @@ public class BlockCrops extends BlockPlant implements IBlockFragilePlantElement
+     }
+ 
+     public boolean f(World world, BlockPosition blockposition, IBlockData iblockdata) {
+-        return (world.k(blockposition) >= 8 || world.i(blockposition)) && this.c(world.getType(blockposition.down()).getBlock());
++        // SparrowCrops - skip light survival check when requireLight is false for this crop
++        boolean requireLight;
++        if (this == Blocks.CARROTS) {
++            requireLight = com.hpfxd.pandaspigot.config.SparrowCropsConfig.carrotRequireLight;
++        } else if (this == Blocks.POTATOES) {
++            requireLight = com.hpfxd.pandaspigot.config.SparrowCropsConfig.potatoRequireLight;
++        } else {
++            requireLight = com.hpfxd.pandaspigot.config.SparrowCropsConfig.wheatRequireLight;
++        }
++        boolean lightOk = !requireLight || (world.k(blockposition) >= 8 || world.i(blockposition));
++        return lightOk && this.c(world.getType(blockposition.down()).getBlock());
+     }
+ 
+     protected Item l() {
+diff --git a/src/main/java/net/minecraft/server/BlockSoil.java b/src/main/java/net/minecraft/server/BlockSoil.java
+index 362a346fc..451b57302 100644
+--- a/src/main/java/net/minecraft/server/BlockSoil.java
++++ b/src/main/java/net/minecraft/server/BlockSoil.java
+@@ -55,6 +55,10 @@ public class BlockSoil extends Block {
+ 
+     public void fallOn(World world, BlockPosition blockposition, Entity entity, float f) {
+         super.fallOn(world, blockposition, entity, f); // CraftBukkit - moved here as game rules / events shouldn't affect fall damage.
++        // SparrowCrops - prevent farmland from being converted to dirt by trampling
++        if (com.hpfxd.pandaspigot.config.SparrowCropsConfig.preventTrampling) {
++            return;
++        }
+         if (entity instanceof EntityLiving) {
+             if (!world.isClientSide && world.random.nextFloat() < f - 0.5F) {
+                 if (!(entity instanceof EntityHuman) && !world.getGameRules().getBoolean("mobGriefing")) {
+diff --git a/src/main/java/net/minecraft/server/BlockStem.java b/src/main/java/net/minecraft/server/BlockStem.java
+index 24daf93ef..4c01810e2 100644
+--- a/src/main/java/net/minecraft/server/BlockStem.java
++++ b/src/main/java/net/minecraft/server/BlockStem.java
+@@ -52,10 +52,19 @@ public class BlockStem extends BlockPlant implements IBlockFragilePlantElement {
+ 
+     public void b(World world, BlockPosition blockposition, IBlockData iblockdata, Random random) {
+         super.b(world, blockposition, iblockdata, random);
+-        if (world.isLightLevel(blockposition.up(), 9)) { // PandaSpigot - Use isLightLevel
+-            float f = BlockCrops.a((Block) this, world, blockposition);
+-
+-            if (random.nextInt((int) (world.growthOdds / (this == Blocks.PUMPKIN_STEM? world.spigotConfig.pumpkinModifier : world.spigotConfig.melonModifier) * (25.0F / f)) + 1) == 0) { // Spigot
++        // SparrowCrops - configurable light requirement per stem type
++        boolean isPumpkin = (this == Blocks.PUMPKIN_STEM);
++        boolean requireLight = isPumpkin
++                ? com.hpfxd.pandaspigot.config.SparrowCropsConfig.pumpkinRequireLight
++                : com.hpfxd.pandaspigot.config.SparrowCropsConfig.melonRequireLight;
++        if (!requireLight || world.isLightLevel(blockposition.up(), 9)) { // PandaSpigot - Use isLightLevel
++            // SparrowCrops - if water not required, treat as fully hydrated (f=4.0) for growth speed
++            boolean requireWater = isPumpkin
++                    ? com.hpfxd.pandaspigot.config.SparrowCropsConfig.pumpkinRequireWater
++                    : com.hpfxd.pandaspigot.config.SparrowCropsConfig.melonRequireWater;
++            float f = requireWater ? BlockCrops.a((Block) this, world, blockposition) : 4.0F;
++
++            if (random.nextInt((int) (world.growthOdds / (isPumpkin ? world.spigotConfig.pumpkinModifier : world.spigotConfig.melonModifier) * (25.0F / f)) + 1) == 0) { // Spigot
+                 int i = ((Integer) iblockdata.get(BlockStem.AGE)).intValue();
+ 
+                 if (i < 7) {
+@@ -76,7 +85,18 @@ public class BlockStem extends BlockPlant implements IBlockFragilePlantElement {
+                     blockposition = blockposition.shift(EnumDirection.EnumDirectionLimit.HORIZONTAL.a(random));
+                     Block block = world.getType(blockposition.down()).getBlock();
+ 
+-                    if (world.getType(blockposition).getBlock().material == Material.AIR && (block == Blocks.FARMLAND || block == Blocks.DIRT || block == Blocks.GRASS)) {
++                    // SparrowCrops - air-drop: drop fruit items into adjacent air instead of placing the block
++                    boolean airDrop = isPumpkin
++                            ? com.hpfxd.pandaspigot.config.SparrowCropsConfig.pumpkinAirDropEnabled
++                            : com.hpfxd.pandaspigot.config.SparrowCropsConfig.melonAirDropEnabled;
++                    if (airDrop && world.getType(blockposition).getBlock().material == Material.AIR) {
++                        if (isPumpkin) {
++                            a(world, blockposition, new ItemStack(Blocks.PUMPKIN));
++                        } else {
++                            int slices = 3 + world.random.nextInt(5);
++                            a(world, blockposition, new ItemStack(Items.MELON, slices));
++                        }
++                    } else if (world.getType(blockposition).getBlock().material == Material.AIR && (block == Blocks.FARMLAND || block == Blocks.DIRT || block == Blocks.GRASS)) {
+                         // world.setTypeUpdate(blockposition, this.blockFruit.getBlockData()); // CraftBukkit
+                         CraftEventFactory.handleBlockGrowEvent(world, blockposition.getX(), blockposition.getY(), blockposition.getZ(), this.blockFruit, 0); // CraftBukkit
+                     }
+diff --git a/src/main/java/net/minecraft/server/DedicatedServer.java b/src/main/java/net/minecraft/server/DedicatedServer.java
+index f73883692..c23c2f869 100644
+--- a/src/main/java/net/minecraft/server/DedicatedServer.java
++++ b/src/main/java/net/minecraft/server/DedicatedServer.java
+@@ -211,6 +211,7 @@ public class DedicatedServer extends MinecraftServer implements IMinecraftServer
+             com.hpfxd.pandaspigot.config.SparrowMiningConfig.init((File) options.valueOf("sparrow-mining"));
+             com.hpfxd.pandaspigot.config.SparrowArmorConfig.init((File) options.valueOf("sparrow-armor"));
+             com.hpfxd.pandaspigot.config.SparrowItemsConfig.init((File) options.valueOf("sparrow-items"));
++            com.hpfxd.pandaspigot.config.SparrowCropsConfig.init((File) options.valueOf("sparrow-crops"));
+             // SparrowItem end
+             // PandaSpigot end
+             // PaperSpigot start
+diff --git a/src/main/java/org/bukkit/craftbukkit/Main.java b/src/main/java/org/bukkit/craftbukkit/Main.java
+index af8a59ba2..82740a43b 100644
+--- a/src/main/java/org/bukkit/craftbukkit/Main.java
++++ b/src/main/java/org/bukkit/craftbukkit/Main.java
+@@ -165,6 +165,12 @@ public class Main {
+                         .ofType(File.class)
+                         .defaultsTo(new File("sparrow-items.yml"))
+                         .describedAs("Yml file");
++
++                acceptsAll(asList("sparrow-crops"), "File for Sparrow crops settings")
++                        .withRequiredArg()
++                        .ofType(File.class)
++                        .defaultsTo(new File("sparrow-crops.yml"))
++                        .describedAs("Yml file");
+                 // SparrowItem end
+ 
+                 acceptsAll(asList("add-plugin", "add-extra-plugin-jar"), "Specify paths to extra plugin jars to be loaded in addition to those in the plugins folder. This argument can be specified multiple times, once for each extra plugin jar path.")

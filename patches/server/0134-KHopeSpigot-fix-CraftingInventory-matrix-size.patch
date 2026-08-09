@@ -1,0 +1,113 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KHopeSpigot <noreply@localhost>
+Date: Mon, 20 Jul 2026 20:40:00 +0200
+Subject: [PATCH] KHopeSpigot: fix CraftingInventory matrix size
+
+CraftInventoryCrafting#getMatrix() must expose only the ingredient grid.
+The inherited inventory size also includes the result slot, causing 3x3
+workbenches to report 10 entries and player crafting grids to report 5.
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/inventory/CraftInventoryCrafting.java b/src/main/java/org/bukkit/craftbukkit/inventory/CraftInventoryCrafting.java
+index e155329ef..12ea297eb 100644
+--- a/src/main/java/org/bukkit/craftbukkit/inventory/CraftInventoryCrafting.java
++++ b/src/main/java/org/bukkit/craftbukkit/inventory/CraftInventoryCrafting.java
+@@ -85,7 +85,10 @@ public class CraftInventoryCrafting extends CraftInventory implements CraftingIn
+     }
+ 
+     public ItemStack[] getMatrix() {
+-        ItemStack[] items = new ItemStack[getSize()];
++        // CraftingInventory#getMatrix() exposes only the ingredient grid.
++        // getSize() also includes the result inventory (1 slot), which made
++        // workbenches report 10 entries and player crafting report 5.
++        ItemStack[] items = new ItemStack[getMatrixInventory().getSize()];
+         net.minecraft.server.ItemStack[] matrix = getMatrixInventory().getContents();
+ 
+         for (int i = 0; i < matrix.length; i++ ) {
+diff --git a/src/test/java/org/bukkit/craftbukkit/inventory/CraftInventoryCraftingMatrixTest.java b/src/test/java/org/bukkit/craftbukkit/inventory/CraftInventoryCraftingMatrixTest.java
+new file mode 100644
+index 000000000..ebec37ddd
+--- /dev/null
++++ b/src/test/java/org/bukkit/craftbukkit/inventory/CraftInventoryCraftingMatrixTest.java
+@@ -0,0 +1,80 @@
++package org.bukkit.craftbukkit.inventory;
++
++import net.minecraft.server.Container;
++import net.minecraft.server.EntityHuman;
++import net.minecraft.server.InventoryCrafting;
++import net.minecraft.server.InventoryCraftResult;
++import net.minecraft.server.Items;
++import net.minecraft.server.NBTTagCompound;
++import net.minecraft.server.NBTTagList;
++import net.minecraft.server.NBTTagString;
++
++import org.bukkit.Material;
++import org.bukkit.inventory.InventoryView;
++import org.bukkit.inventory.ItemStack;
++import org.bukkit.support.AbstractTestingBase;
++import org.junit.Test;
++
++import static org.hamcrest.Matchers.is;
++import static org.junit.Assert.assertThat;
++
++public class CraftInventoryCraftingMatrixTest extends AbstractTestingBase {
++
++    private static final Container CONTAINER = new Container() {
++        @Override public InventoryView getBukkitView() {
++            return null;
++        }
++
++        @Override public boolean a(EntityHuman human) {
++            return true;
++        }
++    };
++
++    @Test
++    public void workbenchMatrixExcludesResultSlot() {
++        assertMatrixSizeAndContents(3, 3, 9);
++    }
++
++    @Test
++    public void playerMatrixExcludesResultSlot() {
++        assertMatrixSizeAndContents(2, 2, 4);
++    }
++
++    private static void assertMatrixSizeAndContents(int width, int height, int expectedSize) {
++        InventoryCrafting matrix = new InventoryCrafting(CONTAINER, width, height);
++        InventoryCraftResult result = new InventoryCraftResult();
++        matrix.resultInventory = result;
++        for (int slot = 0; slot < expectedSize; slot++) {
++            matrix.getContents()[slot] = createAzurite();
++        }
++        result.setItem(0, new net.minecraft.server.ItemStack(Items.DIAMOND_CHESTPLATE));
++
++        CraftInventoryCrafting inventory = new CraftInventoryCrafting(matrix, result);
++        ItemStack[] exposed = inventory.getMatrix();
++
++        assertThat(exposed.length, is(expectedSize));
++        for (ItemStack ingredient : exposed) {
++            assertThat(ingredient.getType(), is(Material.DIAMOND));
++        }
++        CraftItemStack first = (CraftItemStack) exposed[0];
++        assertThat(first.handle.getTag().getString("sparrowmc-item"), is("azurite"));
++        assertThat(first.getItemMeta().getDisplayName(), is("Azurite"));
++        assertThat(first.getItemMeta().getLore().get(0), is("Listes Rares:"));
++        assertThat(inventory.getResult().getType(), is(Material.DIAMOND_CHESTPLATE));
++    }
++
++    private static net.minecraft.server.ItemStack createAzurite() {
++        net.minecraft.server.ItemStack item = new net.minecraft.server.ItemStack(Items.DIAMOND);
++        NBTTagCompound root = new NBTTagCompound();
++        root.setString("sparrowmc-item", "azurite");
++        NBTTagCompound display = new NBTTagCompound();
++        display.setString("Name", "Azurite");
++        NBTTagList lore = new NBTTagList();
++        lore.add(new NBTTagString("Listes Rares:"));
++        lore.add(new NBTTagString("Azurite"));
++        display.set("Lore", lore);
++        root.set("display", display);
++        item.setTag(root);
++        return item;
++    }
++}
+-- 
+2.45.2.windows.1

@@ -1,0 +1,314 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KHopeSpigot <fork@localhost>
+Date: Mon, 20 Jul 2026 19:11:00 +0200
+Subject: [PATCH] KHopeSpigot: resolve and trace unknown crafting matrices
+
+Give custom crafting plugins an isolated preparation hook when the vanilla
+CraftingManager has no matching recipe. Existing recipes and the global
+registry remain untouched. Targeted traces follow a recalculation through the
+manager, event factory, workbench result and click safety path.
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/KCraftDebugTrace.java b/src/main/java/com/hpfxd/pandaspigot/util/KCraftDebugTrace.java
+new file mode 100644
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/util/KCraftDebugTrace.java
+@@ -0,0 +1,114 @@
++package com.hpfxd.pandaspigot.util;
++
++import java.util.Collections;
++import java.util.Map;
++import java.util.WeakHashMap;
++import java.util.concurrent.atomic.AtomicLong;
++
++import net.minecraft.server.IInventory;
++import net.minecraft.server.InventoryCrafting;
++import net.minecraft.server.Item;
++import net.minecraft.server.ItemStack;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.World;
++
++import org.bukkit.entity.Player;
++import org.bukkit.metadata.MetadataValue;
++
++/** Targeted runtime trace shared by the KHopeSpigot crafting stages. */
++public final class KCraftDebugTrace {
++    public static final String METADATA = "kcraft-vanilla-debug";
++
++    private static final AtomicLong IDS = new AtomicLong();
++    private static final Map<InventoryCrafting, Trace> TRACES =
++        Collections.synchronizedMap(new WeakHashMap<InventoryCrafting, Trace>());
++
++    private KCraftDebugTrace() {
++    }
++
++    public static long begin(InventoryCrafting matrix, World world) {
++        Player player = player(matrix);
++        if (!enabled(player)) {
++            TRACES.remove(matrix);
++            return 0L;
++        }
++        Trace trace = new Trace(IDS.incrementAndGet(), player.getName());
++        TRACES.put(matrix, trace);
++        log(trace, "A", "CraftingManager.craft entree monde="
++            + (world == null || world.getWorld() == null ? "?" : world.getWorld().getName())
++            + " taille=" + matrix.getSize() + " matrice=" + describeMatrix(matrix));
++        return trace.id;
++    }
++
++    public static long currentId(InventoryCrafting matrix) {
++        Trace trace = TRACES.get(matrix);
++        return trace == null ? 0L : trace.id;
++    }
++
++    public static void log(InventoryCrafting matrix, String stage, String message) {
++        Trace trace = TRACES.get(matrix);
++        if (trace != null) log(trace, stage, message);
++    }
++
++    public static void logNextTick(final InventoryCrafting matrix,
++                                   final IInventory resultInventory) {
++        final Trace trace = TRACES.get(matrix);
++        if (trace == null) return;
++        MinecraftServer server = MinecraftServer.getServer();
++        if (server == null) return;
++        server.processQueue.add(new Runnable() {
++            @Override public void run() {
++                ItemStack result = resultInventory == null ? null : resultInventory.getItem(0);
++                log(trace, "D+1", "InventoryCraftResult slot0 tick suivant=" + describe(result));
++            }
++        });
++    }
++
++    public static String describe(ItemStack item) {
++        if (item == null) return "VIDE";
++        StringBuilder out = new StringBuilder()
++            .append(Item.getId(item.getItem())).append(':').append(item.getData())
++            .append(" x").append(item.count);
++        if (item.hasTag()) out.append(" nbt=").append(item.getTag());
++        return out.toString();
++    }
++
++    private static String describeMatrix(InventoryCrafting matrix) {
++        StringBuilder out = new StringBuilder();
++        for (int slot = 0; slot < matrix.getSize(); slot++) {
++            if (slot > 0) out.append(' ');
++            out.append('[').append(slot).append('=').append(describe(matrix.getItem(slot))).append(']');
++        }
++        return out.toString();
++    }
++
++    private static Player player(InventoryCrafting matrix) {
++        if (matrix == null || !(matrix.getOwner() instanceof Player)) return null;
++        return (Player) matrix.getOwner();
++    }
++
++    private static boolean enabled(Player player) {
++        if (player == null || !player.hasMetadata(METADATA)) return false;
++        long now = System.currentTimeMillis();
++        for (MetadataValue value : player.getMetadata(METADATA)) {
++            long expiresAt = value.asLong();
++            if (expiresAt <= 0L || expiresAt > now) return true;
++        }
++        return false;
++    }
++
++    private static void log(Trace trace, String stage, String message) {
++        MinecraftServer.LOGGER.info("[KHope-CraftDebug][{}][#{}][{}] {}",
++            trace.playerName, trace.id, stage, message);
++    }
++
++    private static final class Trace {
++        private final long id;
++        private final String playerName;
++
++        private Trace(long id, String playerName) {
++            this.id = id;
++            this.playerName = playerName;
++        }
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/ContainerWorkbench.java b/src/main/java/net/minecraft/server/ContainerWorkbench.java
+--- a/src/main/java/net/minecraft/server/ContainerWorkbench.java
++++ b/src/main/java/net/minecraft/server/ContainerWorkbench.java
+@@ -1,5 +1,7 @@
+ package net.minecraft.server;
+ 
++import com.hpfxd.pandaspigot.util.KCraftDebugTrace;
++
+ // CraftBukkit start
+ import org.bukkit.craftbukkit.inventory.CraftInventoryCrafting;
+ import org.bukkit.craftbukkit.inventory.CraftInventoryView;
+@@ -54,7 +56,13 @@ public class ContainerWorkbench extends Container {
+         // CraftBukkit start
+         CraftingManager.getInstance().lastCraftView = getBukkitView();
+         ItemStack craftResult = CraftingManager.getInstance().craft(this.craftInventory, this.g);
++        KCraftDebugTrace.log(this.craftInventory, "D",
++            "ContainerWorkbench resultat recu=" + KCraftDebugTrace.describe(craftResult));
+         this.resultInventory.setItem(0, craftResult);
++        KCraftDebugTrace.log(this.craftInventory, "D",
++            "InventoryCraftResult slot0 apres ecriture="
++                + KCraftDebugTrace.describe(this.resultInventory.getItem(0)));
++        KCraftDebugTrace.logNextTick(this.craftInventory, this.resultInventory);
+         if (super.listeners.size() < 1) {
+             return;
+         }
+diff --git a/src/main/java/net/minecraft/server/CraftingManager.java b/src/main/java/net/minecraft/server/CraftingManager.java
+--- a/src/main/java/net/minecraft/server/CraftingManager.java
++++ b/src/main/java/net/minecraft/server/CraftingManager.java
+@@ -2,6 +2,7 @@ package net.minecraft.server;
+ 
+ import com.google.common.collect.Lists;
+ import com.google.common.collect.Maps;
++import com.hpfxd.pandaspigot.util.KCraftDebugTrace;
+ import java.util.ArrayList;
+ import java.util.Collections;
+ import java.util.Comparator;
+@@ -279,6 +280,7 @@ public class CraftingManager {
+     }
+ 
+     public ItemStack craft(InventoryCrafting inventorycrafting, World world) {
++        KCraftDebugTrace.begin(inventorycrafting, world);
+         Iterator iterator = this.recipes.iterator();
+ 
+         IRecipe irecipe;
+@@ -286,7 +288,23 @@ public class CraftingManager {
+         do {
+             if (!iterator.hasNext()) {
+                 inventorycrafting.currentRecipe = null; // CraftBukkit - Clear recipe when no recipe is found
++                // KHopeSpigot start - let custom crafting plugins resolve an
++                // otherwise unknown matrix without polluting the global recipe
++                // registry. Non-player inventories keep the vanilla fast path.
++                if (lastCraftView != null && inventorycrafting.getOwner() != null) {
++                    KCraftDebugTrace.log(inventorycrafting, "A",
++                        "aucune recette NMS; appel PrepareUnknownCraftEvent");
++                    ItemStack unknownResult = CraftEventFactory.callPrepareUnknownCraftEvent(
++                        inventorycrafting, lastCraftView);
++                    KCraftDebugTrace.log(inventorycrafting, "A",
++                        "retour CraftEventFactory / retour NMS="
++                            + KCraftDebugTrace.describe(unknownResult));
++                    return unknownResult;
++                }
++                KCraftDebugTrace.log(inventorycrafting, "A",
++                    "aucune recette NMS; hook ignore car owner/view absent");
+                 return null;
++                // KHopeSpigot end
+             }
+ 
+             irecipe = (IRecipe) iterator.next();
+@@ -295,7 +313,14 @@ public class CraftingManager {
+         // CraftBukkit start - INVENTORY_PRE_CRAFT event
+         inventorycrafting.currentRecipe = irecipe;
+         ItemStack result = irecipe.craftItem(inventorycrafting);
+-        return CraftEventFactory.callPreCraftEvent(inventorycrafting, result, lastCraftView, false);
++        KCraftDebugTrace.log(inventorycrafting, "A",
++            "recette NMS trouvee=" + irecipe.getClass().getName()
++                + " resultat brut=" + KCraftDebugTrace.describe(result));
++        ItemStack prepared = CraftEventFactory.callPreCraftEvent(
++            inventorycrafting, result, lastCraftView, false);
++        KCraftDebugTrace.log(inventorycrafting, "A",
++            "retour PrepareItemCraftEvent=" + KCraftDebugTrace.describe(prepared));
++        return prepared;
+         // CraftBukkit end
+     }
+ 
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -1679,18 +1679,47 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+                     org.bukkit.inventory.Inventory top = inventory.getTopInventory();
++                    boolean unknownCraftResult = false; // KHopeSpigot - custom craft safety
++                    InventoryCrafting kcraftDebugMatrix = null;
+                     if (packetplayinwindowclick.b() == 0 && top instanceof CraftingInventory) {
++                        if (top instanceof org.bukkit.craftbukkit.inventory.CraftInventoryCrafting) {
++                            kcraftDebugMatrix = (InventoryCrafting)
++                                ((org.bukkit.craftbukkit.inventory.CraftInventoryCrafting) top)
++                                    .getMatrixInventory();
++                        }
+                         org.bukkit.inventory.Recipe recipe = ((CraftingInventory) top).getRecipe();
+                         if (recipe != null) {
+                             if (click == ClickType.NUMBER_KEY) {
+                                 event = new CraftItemEvent(recipe, inventory, type, packetplayinwindowclick.b(), click, action, packetplayinwindowclick.c());
+                             } else {
+                                 event = new CraftItemEvent(recipe, inventory, type, packetplayinwindowclick.b(), click, action);
+                             }
++                        } else {
++                            // A result prepared through PrepareUnknownCraftEvent has no
++                            // IRecipe. It must never reach SlotResult's vanilla fallback,
++                            // which cannot know the custom consumption contract.
++                            unknownCraftResult = ((CraftingInventory) top).getResult() != null;
+                         }
++                        com.hpfxd.pandaspigot.util.KCraftDebugTrace.log(kcraftDebugMatrix, "E",
++                            "clic rawSlot=" + packetplayinwindowclick.b()
++                                + " currentRecipe=" + (recipe == null ? "<null>"
++                                    : recipe.getClass().getName())
++                                + " evenement=" + event.getClass().getName()
++                                + " resultat-slot="
++                                + com.hpfxd.pandaspigot.util.KCraftDebugTrace.describe(
++                                    this.player.activeContainer.getSlot(0).getItem()));
+                     }
+ 
+                     event.setCancelled(cancelled);
+                     server.getPluginManager().callEvent(event);
++                    com.hpfxd.pandaspigot.util.KCraftDebugTrace.log(kcraftDebugMatrix, "E",
++                        "apres plugins annule=" + event.isCancelled() + " resultat-slot="
++                            + com.hpfxd.pandaspigot.util.KCraftDebugTrace.describe(
++                                this.player.activeContainer.getSlot(0).getItem()));
++                    if (unknownCraftResult) {
++                        event.setCancelled(true);
++                        com.hpfxd.pandaspigot.util.KCraftDebugTrace.log(kcraftDebugMatrix, "E",
++                            "garde-fou unknown applique; evenement force DENY");
++                    }
+ 
+                     switch (event.getResult()) {
+                         case ALLOW:
+                         case DEFAULT:
+diff --git a/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java b/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
+--- a/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
++++ b/src/main/java/org/bukkit/craftbukkit/event/CraftEventFactory.java
+@@ -8,6 +8,8 @@ import java.util.Map;
+ 
+ import com.google.common.base.Function;
+ import com.google.common.base.Functions;
++import com.hpfxd.pandaspigot.event.inventory.PrepareUnknownCraftEvent;
++import com.hpfxd.pandaspigot.util.KCraftDebugTrace;
+ 
+ import net.minecraft.server.*;
+ 
+@@ -752,6 +754,36 @@ public class CraftEventFactory {
+         return CraftItemStack.asNMSCopy(bitem);
+     }
+ 
++    // KHopeSpigot start - custom crafting extension without global bridge recipes
++    public static ItemStack callPrepareUnknownCraftEvent(InventoryCrafting matrix, InventoryView lastCraftView) {
++        int listenerCount = PrepareUnknownCraftEvent.getHandlerList().getRegisteredListeners().length;
++        KCraftDebugTrace.log(matrix, "B", "entree CraftEventFactory view="
++            + (lastCraftView == null ? "<null>" : lastCraftView.getClass().getName())
++            + " joueur=" + (lastCraftView == null ? "<null>" : lastCraftView.getPlayer().getName())
++            + " listeners=" + listenerCount + " resultat-avant="
++            + KCraftDebugTrace.describe(matrix.resultInventory.getItem(0)));
++        if (listenerCount == 0) {
++            KCraftDebugTrace.log(matrix, "B", "aucun listener; retour NMS=VIDE");
++            return null;
++        }
++        CraftInventoryCrafting inventory = new CraftInventoryCrafting(matrix, matrix.resultInventory);
++        inventory.setResult(null);
++
++        PrepareUnknownCraftEvent event = new PrepareUnknownCraftEvent(
++            inventory, lastCraftView, KCraftDebugTrace.currentId(matrix));
++        Bukkit.getPluginManager().callEvent(event);
++
++        org.bukkit.inventory.ItemStack bitem = event.getInventory().getResult();
++        KCraftDebugTrace.log(matrix, "B", "apres evenement resultat-Bukkit="
++            + (bitem == null ? "VIDE" : bitem.getType() + ":" + bitem.getDurability()
++                + " x" + bitem.getAmount()));
++        ItemStack converted = CraftItemStack.asNMSCopy(bitem);
++        KCraftDebugTrace.log(matrix, "B", "conversion Bukkit->NMS / retour="
++            + KCraftDebugTrace.describe(converted));
++        return converted;
++    }
++    // KHopeSpigot end
++
+     // PandaSpigot start
+     public static com.destroystokyo.paper.event.entity.ProjectileCollideEvent callProjectileCollideEvent(Entity entity, MovingObjectPosition position) {
+         Projectile projectile = (Projectile) entity.getBukkitEntity();
+

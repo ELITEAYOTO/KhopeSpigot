@@ -1,0 +1,140 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KHopeSpigot <noreply@localhost>
+Date: Tue, 28 Jul 2026 10:52:00 +0200
+Subject: [PATCH] KHopeSpigot: secure help topic completion
+
+Require real topic visibility, hide plugin indexes and namespaced command
+labels from regular players, and expose an explicit operator/bypass permission.
+diff --git a/src/main/java/org/bukkit/command/defaults/HelpCommand.java b/src/main/java/org/bukkit/command/defaults/HelpCommand.java
+--- a/src/main/java/org/bukkit/command/defaults/HelpCommand.java
++++ b/src/main/java/org/bukkit/command/defaults/HelpCommand.java
+@@ -25,6 +25,9 @@ import org.bukkit.util.ChatPaginator;
+ import com.google.common.collect.ImmutableList;
+ 
+ public class HelpCommand extends VanillaCommand {
++    public static final String COMMAND_ENUMERATION_BYPASS =
++            "pandaspigot.command-enumeration.bypass";
++
+     public HelpCommand() {
+         super("help");
+         this.description = "Shows the help menu";
+@@ -123,7 +126,8 @@ public class HelpCommand extends VanillaCommand {
+             for (HelpTopic topic : Bukkit.getServer().getHelpMap().getHelpTopics()) {
+                 String trimmedTopic = topic.getName().startsWith("/") ? topic.getName().substring(1) : topic.getName();
+ 
+-                if (trimmedTopic.startsWith(searchString)) {
++                if (trimmedTopic.startsWith(searchString)
++                        && isTopicVisibleForCompletion(sender, topic)) {
+                     matchedTopics.add(trimmedTopic);
+                 }
+             }
+@@ -132,6 +136,18 @@ public class HelpCommand extends VanillaCommand {
+         return ImmutableList.of();
+     }
+ 
++    static boolean isTopicVisibleForCompletion(CommandSender sender, HelpTopic topic) {
++        if (!topic.canSee(sender)) {
++            return false;
++        }
++        if (sender.hasPermission(COMMAND_ENUMERATION_BYPASS)) {
++            return true;
++        }
++
++        String name = topic.getName();
++        return name.startsWith("/") && name.indexOf(':') < 0;
++    }
++
+     protected HelpTopic findPossibleMatches(String searchString) {
+         int maxDistance = (searchString.length() / 5) + 3;
+         Set<HelpTopic> possibleMatches = new TreeSet<HelpTopic>(HelpTopicComparator.helpTopicComparatorInstance());
+diff --git a/src/test/java/org/bukkit/command/defaults/HelpCommandSecurityTest.java b/src/test/java/org/bukkit/command/defaults/HelpCommandSecurityTest.java
+new file mode 100644
+index 00000000..1480d600
+--- /dev/null
++++ b/src/test/java/org/bukkit/command/defaults/HelpCommandSecurityTest.java
+@@ -0,0 +1,83 @@
++package org.bukkit.command.defaults;
++
++import static org.junit.Assert.assertFalse;
++import static org.junit.Assert.assertTrue;
++
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.Method;
++import java.lang.reflect.Proxy;
++
++import org.bukkit.command.CommandSender;
++import org.bukkit.help.HelpTopic;
++import org.junit.Test;
++
++public class HelpCommandSecurityTest {
++
++    @Test
++    public void hidesPluginIndexFromRegularPlayer() {
++        assertFalse(HelpCommand.isTopicVisibleForCompletion(
++                sender(false), topic("Kcraft", true)));
++    }
++
++    @Test
++    public void hidesNamespacedCommandFromRegularPlayer() {
++        assertFalse(HelpCommand.isTopicVisibleForCompletion(
++                sender(false), topic("/kcraft:reload", true)));
++    }
++
++    @Test
++    public void keepsAuthorizedPlainCommandForRegularPlayer() {
++        assertTrue(HelpCommand.isTopicVisibleForCompletion(
++                sender(false), topic("/jobs", true)));
++    }
++
++    @Test
++    public void neverLeaksCommandWithoutItsPermission() {
++        assertFalse(HelpCommand.isTopicVisibleForCompletion(
++                sender(true), topic("/admin", false)));
++    }
++
++    @Test
++    public void bypassCanInspectPluginIndexes() {
++        assertTrue(HelpCommand.isTopicVisibleForCompletion(
++                sender(true), topic("Kcraft", true)));
++    }
++
++    private static HelpTopic topic(final String topicName, final boolean canSee) {
++        return new HelpTopic() {
++            {
++                this.name = topicName;
++                this.shortText = "";
++                this.fullText = "";
++            }
++
++            @Override
++            public boolean canSee(CommandSender sender) {
++                return canSee;
++            }
++        };
++    }
++
++    private static CommandSender sender(final boolean bypass) {
++        return (CommandSender) Proxy.newProxyInstance(
++                HelpCommandSecurityTest.class.getClassLoader(),
++                new Class<?>[] { CommandSender.class },
++                new InvocationHandler() {
++                    @Override
++                    public Object invoke(Object proxy, Method method, Object[] args) {
++                        if ("hasPermission".equals(method.getName())
++                                && args != null && args.length == 1) {
++                            return bypass
++                                    && HelpCommand.COMMAND_ENUMERATION_BYPASS.equals(args[0]);
++                        }
++                        Class<?> type = method.getReturnType();
++                        if (type == boolean.class) return false;
++                        if (type == int.class) return 0;
++                        if (type == long.class) return 0L;
++                        if (type == float.class) return 0F;
++                        if (type == double.class) return 0D;
++                        return null;
++                    }
++                });
++    }
++}
+-- 
+2.45.2.windows.1

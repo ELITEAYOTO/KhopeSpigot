@@ -1,0 +1,174 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KhopeSpigot <fork@localhost>
+Date: Fri, 8 May 2026 00:03:17 +0200
+Subject: [PATCH] Fix javadoc: @see member syntax and non-blocking URL fetch
+ errors
+
+
+diff --git a/build.gradle.kts b/build.gradle.kts
+index 6e727d855493daeae6a2d8e649fad95ea25db1ce..2d32b8553f1995a3efd9d357c92d74c84f21e907 100644
+--- a/build.gradle.kts
++++ b/build.gradle.kts
+@@ -64,6 +64,7 @@ tasks {
+     }
+ 
+     withType<Javadoc> {
++        isFailOnError = false // URL fetch failures (javadoc.io down/slow) must not block the build
+         (options as StandardJavadocDocletOptions).let {
+             // hide warnings
+             it.addBooleanOption("Xdoclint:none", true)
+diff --git a/src/main/java/org/bukkit/material/Door.java b/src/main/java/org/bukkit/material/Door.java
+index e02d8e662e443fc40d3f6ffcb6154321d7b7ec98..07a40a00f06fef9e8bdb200d30cc7acdc9d79ea8 100644
+--- a/src/main/java/org/bukkit/material/Door.java
++++ b/src/main/java/org/bukkit/material/Door.java
+@@ -11,13 +11,13 @@ import org.bukkit.block.BlockFace;
+  * work with modern doors. Some methods are undefined dependant on <code>isTopHalf()</code>
+  * due to Minecraft's internal representation of doors.
+  *
+- * @see Material.WOODEN_DOOR
+- * @see Material.IRON_DOOR_BLOCK
+- * @see Material.SPRUCE_DOOR
+- * @see Material.BIRCH_DOOR
+- * @see Material.JUNGLE_DOOR
+- * @see Material.ACACIA_DOOR
+- * @see Material.DARK_OAK_DOOR
++ * @see Material#WOODEN_DOOR
++ * @see Material#IRON_DOOR_BLOCK
++ * @see Material#SPRUCE_DOOR
++ * @see Material#BIRCH_DOOR
++ * @see Material#JUNGLE_DOOR
++ * @see Material#ACACIA_DOOR
++ * @see Material#DARK_OAK_DOOR
+  */
+ public class Door extends MaterialData implements Directional, Openable {
+ 
+@@ -51,18 +51,18 @@ public class Door extends MaterialData implements Directional, Openable {
+      * @param type The type of material this door is made of. This must match the type of the block above.
+      * @param face The direction the door is facing.
+      *
+-     * @see Material.WOODEN_DOOR
+-     * @see Material.IRON_DOOR_BLOCK
+-     * @see Material.SPRUCE_DOOR
+-     * @see Material.BIRCH_DOOR
+-     * @see Material.JUNGLE_DOOR
+-     * @see Material.ACACIA_DOOR
+-     * @see Material.DARK_OAK_DOOR
++     * @see Material#WOODEN_DOOR
++     * @see Material#IRON_DOOR_BLOCK
++     * @see Material#SPRUCE_DOOR
++     * @see Material#BIRCH_DOOR
++     * @see Material#JUNGLE_DOOR
++     * @see Material#ACACIA_DOOR
++     * @see Material#DARK_OAK_DOOR
+      *
+-     * @see BlockFace.WEST
+-     * @see BlockFace.NORTH
+-     * @see BlockFace.EAST
+-     * @see BlockFace.SOUTH
++     * @see BlockFace#WEST
++     * @see BlockFace#NORTH
++     * @see BlockFace#EAST
++     * @see BlockFace#SOUTH
+      */
+     public Door(final Material type, BlockFace face) {
+         this(type, face, false);
+@@ -76,18 +76,18 @@ public class Door extends MaterialData implements Directional, Openable {
+      * @param face The direction the door is facing.
+      * @param isOpen Whether the door is currently opened.
+      *
+-     * @see Material.WOODEN_DOOR
+-     * @see Material.IRON_DOOR_BLOCK
+-     * @see Material.SPRUCE_DOOR
+-     * @see Material.BIRCH_DOOR
+-     * @see Material.JUNGLE_DOOR
+-     * @see Material.ACACIA_DOOR
+-     * @see Material.DARK_OAK_DOOR
++     * @see Material#WOODEN_DOOR
++     * @see Material#IRON_DOOR_BLOCK
++     * @see Material#SPRUCE_DOOR
++     * @see Material#BIRCH_DOOR
++     * @see Material#JUNGLE_DOOR
++     * @see Material#ACACIA_DOOR
++     * @see Material#DARK_OAK_DOOR
+      *
+-     * @see BlockFace.WEST
+-     * @see BlockFace.NORTH
+-     * @see BlockFace.EAST
+-     * @see BlockFace.SOUTH
++     * @see BlockFace#WEST
++     * @see BlockFace#NORTH
++     * @see BlockFace#EAST
++     * @see BlockFace#SOUTH
+      */
+     public Door(final Material type, BlockFace face, boolean isOpen) {
+         super(type);
+@@ -102,13 +102,13 @@ public class Door extends MaterialData implements Directional, Openable {
+      * @param type The type of material this door is made of. This must match the type of the block below.
+      * @param isHingeRight True if the hinge is on the right hand side, false if the hinge is on the left hand side.
+      *
+-     * @see Material.WOODEN_DOOR
+-     * @see Material.IRON_DOOR_BLOCK
+-     * @see Material.SPRUCE_DOOR
+-     * @see Material.BIRCH_DOOR
+-     * @see Material.JUNGLE_DOOR
+-     * @see Material.ACACIA_DOOR
+-     * @see Material.DARK_OAK_DOOR
++     * @see Material#WOODEN_DOOR
++     * @see Material#IRON_DOOR_BLOCK
++     * @see Material#SPRUCE_DOOR
++     * @see Material#BIRCH_DOOR
++     * @see Material#JUNGLE_DOOR
++     * @see Material#ACACIA_DOOR
++     * @see Material#DARK_OAK_DOOR
+      */
+     public Door(final Material type, boolean isHingeRight) {
+         super(type);
+@@ -125,10 +125,10 @@ public class Door extends MaterialData implements Directional, Openable {
+      *
+      * @see TreeSpecies
+      *
+-     * @see BlockFace.WEST
+-     * @see BlockFace.NORTH
+-     * @see BlockFace.EAST
+-     * @see BlockFace.SOUTH
++     * @see BlockFace#WEST
++     * @see BlockFace#NORTH
++     * @see BlockFace#EAST
++     * @see BlockFace#SOUTH
+      */
+     public Door(final TreeSpecies species, BlockFace face) {
+         this(getWoodDoorOfSpecies(species), face, false);
+@@ -144,10 +144,10 @@ public class Door extends MaterialData implements Directional, Openable {
+      *
+      * @see TreeSpecies
+      *
+-     * @see BlockFace.WEST
+-     * @see BlockFace.NORTH
+-     * @see BlockFace.EAST
+-     * @see BlockFace.SOUTH
++     * @see BlockFace#WEST
++     * @see BlockFace#NORTH
++     * @see BlockFace#EAST
++     * @see BlockFace#SOUTH
+      */
+     public Door(final TreeSpecies species, BlockFace face, boolean isOpen) {
+         this(getWoodDoorOfSpecies(species), face, isOpen);
+@@ -191,12 +191,12 @@ public class Door extends MaterialData implements Directional, Openable {
+      * @param species The species of wood door required.
+      * @return The item type for the given species.
+      *
+-     * @see Material.WOODEN_DOOR
+-     * @see Material.SPRUCE_DOOR
+-     * @see Material.BIRCH_DOOR
+-     * @see Material.JUNGLE_DOOR
+-     * @see Material.ACACIA_DOOR
+-     * @see Material.DARK_OAK_DOOR
++     * @see Material#WOODEN_DOOR
++     * @see Material#SPRUCE_DOOR
++     * @see Material#BIRCH_DOOR
++     * @see Material#JUNGLE_DOOR
++     * @see Material#ACACIA_DOOR
++     * @see Material#DARK_OAK_DOOR
+      */
+     public static Material getWoodDoorOfSpecies(TreeSpecies species) {
+         switch (species) {

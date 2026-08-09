@@ -1,0 +1,112 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KHopeSpigot <noreply@localhost>
+Date: Tue, 28 Jul 2026 10:00:00 +0200
+Subject: [PATCH] KHopeSpigot: refresh crafting state after setMatrix
+
+CraftInventoryCrafting#setMatrix replaced the NMS backing array without
+notifying its Container. The ingredients were updated, including their NBT,
+but currentRecipe and the prepare cycle could remain associated with the
+previous craft. This was observable when two KCraft recipes were performed
+from stacked custom ingredients: the second preview could fall back to the
+stale vanilla armor recipe.
+
+Keep the matrix replacement atomic, then notify the Container exactly once.
+
+diff --git a/src/main/java/net/minecraft/server/InventoryCrafting.java b/src/main/java/net/minecraft/server/InventoryCrafting.java
+--- a/src/main/java/net/minecraft/server/InventoryCrafting.java
++++ b/src/main/java/net/minecraft/server/InventoryCrafting.java
+@@ -126,8 +126,15 @@ public class InventoryCrafting implements IInventory {
+ 
+     public void setItem(int i, ItemStack itemstack) {
+         this.items[i] = itemstack;
++        this.notifyContentsChanged();
++    }
++
++    // KHopeSpigot start - allow CraftInventoryCrafting to commit a complete
++    // matrix atomically and then trigger exactly one recipe recalculation.
++    public void notifyContentsChanged() {
+         this.d.a((IInventory) this);
+     }
++    // KHopeSpigot end
+ 
+     public int getMaxStackSize() {
+         return 64;
+diff --git a/src/main/java/org/bukkit/craftbukkit/inventory/CraftInventoryCrafting.java b/src/main/java/org/bukkit/craftbukkit/inventory/CraftInventoryCrafting.java
+--- a/src/main/java/org/bukkit/craftbukkit/inventory/CraftInventoryCrafting.java
++++ b/src/main/java/org/bukkit/craftbukkit/inventory/CraftInventoryCrafting.java
+@@ -123,6 +123,12 @@ public class CraftInventoryCrafting extends CraftInventory implements CraftingIn
+                 mcItems[i] = null;
+             }
+         }
++
++        // Replacing the backing array directly keeps the operation atomic, but
++        // ContainerWorkbench must still recalculate currentRecipe and fire the
++        // prepare cycle. Without this notification, a second craft can reuse
++        // the previous vanilla recipe even though the remaining NBT changed.
++        ((InventoryCrafting) getMatrixInventory()).notifyContentsChanged();
+     }
+ 
+     public void setResult(ItemStack item) {
+diff --git a/src/test/java/org/bukkit/craftbukkit/inventory/CraftInventoryCraftingMatrixTest.java b/src/test/java/org/bukkit/craftbukkit/inventory/CraftInventoryCraftingMatrixTest.java
+--- a/src/test/java/org/bukkit/craftbukkit/inventory/CraftInventoryCraftingMatrixTest.java
++++ b/src/test/java/org/bukkit/craftbukkit/inventory/CraftInventoryCraftingMatrixTest.java
+@@ -2,6 +2,7 @@ package org.bukkit.craftbukkit.inventory;
+ 
+ import net.minecraft.server.Container;
+ import net.minecraft.server.EntityHuman;
++import net.minecraft.server.IInventory;
+ import net.minecraft.server.InventoryCrafting;
+ import net.minecraft.server.InventoryCraftResult;
+ import net.minecraft.server.Items;
+@@ -40,6 +41,25 @@ public class CraftInventoryCraftingMatrixTest extends AbstractTestingBase {
+         assertMatrixSizeAndContents(2, 2, 4);
+     }
+ 
++    @Test
++    public void replacingMatrixNotifiesContainerExactlyOnceAndPreservesNbt() {
++        CountingContainer container = new CountingContainer();
++        InventoryCrafting matrix = new InventoryCrafting(container, 3, 3);
++        InventoryCraftResult result = new InventoryCraftResult();
++        matrix.resultInventory = result;
++        CraftInventoryCrafting inventory = new CraftInventoryCrafting(matrix, result);
++
++        ItemStack[] replacement = new ItemStack[9];
++        replacement[0] = CraftItemStack.asCraftMirror(createAzurite());
++        replacement[4] = new ItemStack(Material.DIAMOND, 2);
++        inventory.setMatrix(replacement);
++
++        assertThat(container.changeNotifications, is(1));
++        assertThat(inventory.getMatrix()[4].getAmount(), is(2));
++        CraftItemStack custom = (CraftItemStack) inventory.getMatrix()[0];
++        assertThat(custom.handle.getTag().getString("sparrowmc-item"), is("azurite"));
++    }
++
+     private static void assertMatrixSizeAndContents(int width, int height, int expectedSize) {
+         InventoryCrafting matrix = new InventoryCrafting(CONTAINER, width, height);
+         InventoryCraftResult result = new InventoryCraftResult();
+@@ -77,4 +97,23 @@ public class CraftInventoryCraftingMatrixTest extends AbstractTestingBase {
+         item.setTag(root);
+         return item;
+     }
++
++    private static final class CountingContainer extends Container {
++        private int changeNotifications;
++
++        @Override
++        public void a(IInventory inventory) {
++            changeNotifications++;
++        }
++
++        @Override
++        public InventoryView getBukkitView() {
++            return null;
++        }
++
++        @Override
++        public boolean a(EntityHuman human) {
++            return true;
++        }
++    }
+ }
+-- 
+2.45.2.windows.1

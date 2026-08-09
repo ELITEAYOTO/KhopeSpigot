@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Tue, 28 Jul 2026 17:13:53 +0200
+Subject: [PATCH] KHopeSpigot: make chunk flush deadlock test startup-safe
+
+
+diff --git a/src/test/java/net/minecraft/server/ChunkRegionLoaderTest.java b/src/test/java/net/minecraft/server/ChunkRegionLoaderTest.java
+index 005a2baa9d238649af4e08c0a1db69337894da33..aa0b5a1e4706ca35c2883b6cb5921b2e50740e85 100644
+--- a/src/test/java/net/minecraft/server/ChunkRegionLoaderTest.java
++++ b/src/test/java/net/minecraft/server/ChunkRegionLoaderTest.java
+@@ -7,7 +7,10 @@ import org.junit.Test;
+ 
+ public class ChunkRegionLoaderTest {
+ 
+-    @Test(timeout = 1000L)
++    // The first reference initializes Log4j on cold JVMs before exercising
++    // ChunkRegionLoader. Keep a finite deadlock guard without making startup
++    // latency part of the behavior under test.
++    @Test(timeout = 5000L)
+     public void flushReturnsWhenNoChunkIsPending() throws Exception {
+         File regionDirectory = Files.createTempDirectory("chunk-region-loader-test").toFile();
+ 
