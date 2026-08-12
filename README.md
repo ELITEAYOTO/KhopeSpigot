@@ -1,94 +1,133 @@
-# PandaSpigot [![Build](https://img.shields.io/github/actions/workflow/status/hpfxd/PandaSpigot/build.yml?branch=master&label=Build)](https://github.com/hpfxd/PandaSpigot/actions/workflows/build.yml) [![Discord](https://img.shields.io/discord/1048733138655924274?label=Discord)](https://discord.gg/m6vCCX6Hvr) [![Servers](https://img.shields.io/bstats/servers/15154?label=Servers)](https://bstats.org/plugin/bukkit/PandaSpigot/15154)
-Fork of Paper for 1.8.8 focused on improved performance and stability.
+# KhopeSpigot
 
-## Highlights
-- **Backported API enhancements from newer versions**
-    - ServerTickStartEvent & ServerTickEndEvent
-    - PlayerChunkLoadEvent & PlayerChunkUnloadEvent
-    - PlayerHandshakeEvent
-    - EntityMoveEvent
+KhopeSpigot est un fork personnalisé de [PandaSpigot](https://github.com/hpfxd/PandaSpigot) pour **Minecraft 1.8.8**.
 
-- **Greatly improved network performance**
-    - **Updating to Netty 4.1** offers the ability to use newer Java versions with epoll on Linux.
-    - **Improved flush handling** to massively improve entity tracker performance.
-    - **Support for Unix domain sockets** to avoid the overhead of TCP when using a proxy on the same machine.
+Le projet conserve la base, les optimisations et les correctifs de PandaSpigot tout en ajoutant des modifications spécifiques à KhopeSpigot et aux besoins du serveur **Volkaria**.
 
-- **More configuration options**, such as:
-    - Customizable knockback
-    - World and player data saving
+> **Upstream principal :** [hpfxd/PandaSpigot](https://github.com/hpfxd/PandaSpigot)
 
-See a full list of patches [here](./patches/).
+## Objectifs
 
-## Using
-You can download the latest pre-built server JAR by clicking the download button below.  
-[![Download](https://custom-icon-badges.demolab.com/badge/-Download-blue?style=for-the-badge&logo=download&logoColor=white)](https://downloads.hpfxd.com/v2/projects/pandaspigot/versions/1.8.8/builds/latest/downloads/paperclip)
+KhopeSpigot vise principalement à fournir une base 1.8.8 :
 
-For support, please join our [Discord](https://discord.gg/m6vCCX6Hvr).
+- performante ;
+- stable ;
+- adaptée à un serveur Faction ;
+- compatible avec les systèmes spécifiques de Volkaria ;
+- facile à maintenir par rapport aux évolutions de PandaSpigot ;
+- capable d'accueillir des optimisations et correctifs réseau, chunks, entités et gameplay.
 
-## API 
-See our API patches [here](./patches/api/).  
-[![Javadocs](https://repo.hpfxd.com/api/badge/latest/releases/com/hpfxd/pandaspigot/pandaspigot-api?name=Javadocs)](https://repo.hpfxd.com/javadoc/releases/com/hpfxd/pandaspigot/pandaspigot-api/1.8.8-R0.1-SNAPSHOT/raw/index.html)
-<details>
-<summary>Maven</summary>
+## Base du projet
 
-```xml
-<repositories>
-    <repository>
-        <id>hpfxd-repo</id>
-        <url>https://repo.hpfxd.com/releases/</url>
-    </repository>
-</repositories>
+KhopeSpigot est dérivé de plusieurs projets open source, notamment :
 
-<dependencies>
-    <dependency>
-        <groupId>com.hpfxd.pandaspigot</groupId>
-        <artifactId>pandaspigot-api</artifactId>
-        <version>1.8.8-R0.1-SNAPSHOT</version>
-        <scope>provided</scope>
-    </dependency>
-</dependencies>
+- [PandaSpigot](https://github.com/hpfxd/PandaSpigot) ;
+- Paper ;
+- Spigot / CraftBukkit.
+
+Une grande partie de l'historique Git du dépôt provient donc de PandaSpigot et de ses projets upstream.
+
+Les contributeurs historiques affichés par GitHub correspondent aux auteurs des commits présents dans cet historique. Leur présence dans la liste des contributeurs ne signifie pas qu'ils participent directement au développement de KhopeSpigot.
+
+## Modifications KhopeSpigot
+
+Les modifications propres à KhopeSpigot sont maintenues au-dessus de la base PandaSpigot.
+
+Le dépôt utilise notamment le système de patches hérité de PandaSpigot :
+
+```text
+patches/
 ```
-</details>
 
-<details>
-<summary>Gradle (kts)</summary>
+Lorsque cela est pertinent, les changements apportés aux sources upstream doivent rester aussi isolés et lisibles que possible afin de faciliter les futures mises à jour depuis PandaSpigot.
 
-```kotlin
-repositories {
-    mavenCentral()
-    maven(url = "https://repo.hpfxd.com/releases/")
-}
+## Compilation
 
-dependencies {
-    compileOnly("com.hpfxd.pandaspigot:pandaspigot-api:1.8.8-R0.1-SNAPSHOT")
-}
+### Prérequis
+
+Pour compiler KhopeSpigot :
+
+- JDK 17 ;
+- Git ;
+- Bash.
+
+JDK 17 est utilisé pour le processus de build et de décompilation hérité de PandaSpigot.
+
+### Build
+
+Depuis la racine du dépôt :
+
+```bash
+./panda jar
 ```
-</details>
 
-## Building
-To compile PandaSpigot, you'll need:
-- JDK 17 (required to run the decompiler)
-- Git
-- Bash
+Le JAR Paperclip final est généré dans :
 
-🧩 Although JDK 17 is required for building, the compiled JAR remains fully compatible with Java 8.
+```text
+paperclip.jar
+```
 
-Building, patching, and compiling are all done through the main `panda` script.
+Sous Windows, il est recommandé d'utiliser un environnement Bash compatible, par exemple Git Bash ou WSL, pour les scripts prévus pour Bash.
 
-PandaSpigot can be built by running `./panda jar`, and you will find the final Paperclip jar in `paperclip.jar`
+## Dépôts Git
 
-## Contributing
-You can mostly follow [Paper's contributing guide](https://github.com/PaperMC/Paper-archive/blob/ver/1.16.5/CONTRIBUTING.md), just remember:
-- Multi-line changes start with `// PandaSpigot start` and end with `// PandaSpigot end`
-- If the change isn't obvious, add a small explanation like this: `// PandaSpigot start - reason`
-- One-line changes should have `// PandaSpigot` at the end of the line.
-- Follow Java code style (aka. Oracle style), with some exceptions:
-  - If you are modifying upstream files, keep your diff size minimal. Going over 80 characters per line is fine to make this happen.
-  - When in doubt or the code around your change is in a clearly different style, use the same style as the surrounding code.
+Le dépôt KhopeSpigot utilise la convention suivante :
 
-When contributing, please think about the side effects of any changes you write.
-Plugin compatibility is important, and we wish to minimize any breakage.
+```text
+origin   -> ELITEAYOTO/KhopeSpigot
+upstream -> hpfxd/PandaSpigot
+```
 
-Please do not open pull requests for features that you cannot justify the existence of,
-and the added maintenance costs of that come along with them. If you are thinking of
-adding a feature that may be controversial, please open an issue first!
+Pour récupérer les dernières références PandaSpigot sans modifier la branche de travail :
+
+```bash
+git fetch upstream
+```
+
+Pour voir les commits présents dans PandaSpigot mais pas encore dans KhopeSpigot :
+
+```bash
+git log main..upstream/master --oneline
+```
+
+Pour voir les commits propres à KhopeSpigot par rapport à PandaSpigot :
+
+```bash
+git log upstream/master..main --oneline
+```
+
+Les mises à jour upstream doivent être intégrées volontairement et testées avant d'être ajoutées à `main`.
+
+## Branches
+
+La branche principale de KhopeSpigot est :
+
+```text
+main
+```
+
+La branche upstream de PandaSpigot reste accessible localement via :
+
+```text
+upstream/master
+```
+
+## Contributions
+
+Avant toute contribution, consulte [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+Pour l'historique et les crédits des projets dont KhopeSpigot est dérivé, consulte [CREDITS.md](./CREDITS.md).
+
+## Support
+
+KhopeSpigot est un fork indépendant.
+
+Pour les problèmes concernant exclusivement PandaSpigot et non les modifications KhopeSpigot, utilise les ressources officielles du projet PandaSpigot.
+
+## Licence
+
+KhopeSpigot conserve la licence **GNU General Public License v3.0** applicable au projet dont il est dérivé.
+
+Consulte [LICENSE.md](./LICENSE.md) pour le texte complet de la licence.
+
+Les droits d'auteur des portions de code provenant de PandaSpigot, Paper, Spigot et des autres projets upstream restent attribués à leurs auteurs respectifs.
