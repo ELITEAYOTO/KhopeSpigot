@@ -1,0 +1,86 @@
+From 21331eae9c3bea3977d7d657d5f962c9dbfe7543 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Sun, 16 Aug 2026 20:09:26 +0200
+Subject: [PATCH] KHopeSpigot: restore main queue tick fairness
+
+---
+ .../net/minecraft/server/MinecraftServer.java | 42 ++++++++++++++++---
+ 1 file changed, 37 insertions(+), 5 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 484935177..cc8dc38f9 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -101,6 +101,26 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+     private final GameProfileRepository Y;
+     private final UserCache Z;
+     protected final Queue<FutureTask<?>> j = new java.util.concurrent.ConcurrentLinkedQueue<FutureTask<?>>(); // Spigot, PAIL: Rename
++    // KHopeSpigot start - Main-thread queue tick-boundary fairness
++    //
++    // PandaSpigot changed the original bounded drain:
++    //   int count = this.j.size();
++    //   while (count-- > 0 && ...)
++    // into an unbounded "drain until empty" loop. Under sustained packet/plugin
++    // submissions, newly queued tasks could therefore keep the main thread in
++    // the jobs phase for the same tick.
++    //
++    // A reusable marker restores the original tick-boundary semantics without
++    // ConcurrentLinkedQueue.size(), which is O(n). Tasks queued after this
++    // marker stay for the next tick. The marker itself is never executed.
++    private final FutureTask<Void> khopeMainQueueBoundary = new FutureTask<Void>(new Callable<Void>() {
++        @Override
++        public Void call() {
++            return null;
++        }
++    });
++    private volatile boolean khopeMainQueueBoundaryQueued;
++    // KHopeSpigot end
+     private Thread serverThread;
+     private long ab = az();
+ 
+@@ -868,10 +888,20 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         int khopeJobsOver10Ms = 0;
+         int khopeJobsOver50Ms = 0;
+ 
+-        // PandaSpigot start - Remove redundant empty list check
+-        // int count = this.j.size();
+-        while (/*count-- > 0 &&*/ (entry = this.j.poll()) != null) {
+-        // PandaSpigot end
++        // KHopeSpigot start - Main-thread queue tick-boundary fairness
++        //
++        // Insert a marker at the current tail. Concurrent producers that
++        // enqueue after this point are intentionally deferred to the next tick.
++        // This prevents a continuously fed queue from starving the rest of B().
++        this.khopeMainQueueBoundaryQueued = true;
++        this.j.add(this.khopeMainQueueBoundary);
++
++        while ((entry = this.j.poll()) != null) {
++            if (entry == this.khopeMainQueueBoundary) {
++                this.khopeMainQueueBoundaryQueued = false;
++                break;
++            }
++
+             final long khopeJobStartNanos = khopeJobs ? System.nanoTime() : 0L;
+             SystemUtils.a(entry, MinecraftServer.LOGGER);
+ 
+@@ -886,6 +916,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                 if (khopeJobNanos > 50_000_000L) ++khopeJobsOver50Ms;
+             }
+          }
++        // KHopeSpigot end
+         // Spigot end
+ 
+         if (khopeJobs && khopeJobCount != 0) {
+@@ -1789,7 +1820,8 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+     }
+ 
+     public int getKhopeMainQueueSize() {
+-        return this.j.size();
++        final int size = this.j.size();
++        return this.khopeMainQueueBoundaryQueued && size > 0 ? size - 1 : size;
+     }
+ 
+     public boolean isMainThread() {
+-- 
+2.51.0.windows.1
+
