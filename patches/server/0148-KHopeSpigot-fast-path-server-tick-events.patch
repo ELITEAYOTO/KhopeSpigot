@@ -1,0 +1,72 @@
+From 093a7adb7da0bbc0e1a9e28e5e51e5452378edde Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Sun, 16 Aug 2026 20:26:24 +0200
+Subject: [PATCH] KHopeSpigot: fast-path server tick events
+
+---
+ .../net/minecraft/server/MinecraftServer.java | 40 +++++++++++++------
+ 1 file changed, 28 insertions(+), 12 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index cc8dc38f9..5e991d6a6 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -783,12 +783,19 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                 com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.beginTickBreakdown();
+         co.aikar.timings.TimingsManager.FULL_SERVER_TICK.startTiming(); // Spigot
+         long i = System.nanoTime();
+-        new com.destroystokyo.paper.event.server.ServerTickStartEvent(this.ticks + 1).callEvent(); // PandaSpigot - Add ServerTickStartEvent
+-        if (khopeDetail) {
+-            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordSection(
+-                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_TICK_EVENTS,
+-                    System.nanoTime() - i);
++        // KHopeSpigot start - Tick event fast path
++        if (com.destroystokyo.paper.event.server.ServerTickStartEvent.getHandlerList()
++                .getRegisteredListeners().length != 0) {
++            final long khopeTickStartEventNanos = khopeDetail ? System.nanoTime() : 0L;
++            new com.destroystokyo.paper.event.server.ServerTickStartEvent(this.ticks + 1).callEvent();
++
++            if (khopeDetail) {
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordSection(
++                        com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_TICK_EVENTS,
++                        System.nanoTime() - khopeTickStartEventNanos);
++            }
+         }
++        // KHopeSpigot end
+ 
+         ++this.ticks;
+         if (this.T) {
+@@ -854,14 +861,23 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         this.methodProfiler.b();
+         org.spigotmc.WatchdogThread.tick(); // Spigot
+         // PandaSpigot start - Add ServerTickEndEvent
+-        long endTime = System.nanoTime();
+-        long remaining = (TICK_TIME - (endTime - lastTick));
+-        new com.destroystokyo.paper.event.server.ServerTickEndEvent(this.ticks, ((double)(endTime - lastTick) / 1000000D), remaining).callEvent();
+-        if (khopeDetail) {
+-            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordSection(
+-                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_TICK_EVENTS,
+-                    System.nanoTime() - endTime);
++        // KHopeSpigot start - Tick event fast path
++        if (com.destroystokyo.paper.event.server.ServerTickEndEvent.getHandlerList()
++                .getRegisteredListeners().length != 0) {
++            final long endTime = System.nanoTime();
++            final long remaining = (TICK_TIME - (endTime - lastTick));
++            new com.destroystokyo.paper.event.server.ServerTickEndEvent(
++                    this.ticks,
++                    ((double) (endTime - lastTick) / 1000000D),
++                    remaining).callEvent();
++
++            if (khopeDetail) {
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordSection(
++                        com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_TICK_EVENTS,
++                        System.nanoTime() - endTime);
++            }
+         }
++        // KHopeSpigot end
+         // PandaSpigot end
+         co.aikar.timings.TimingsManager.FULL_SERVER_TICK.stopTiming(); // Spigot
+     }
+-- 
+2.51.0.windows.1
+
