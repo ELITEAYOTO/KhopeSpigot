@@ -1,0 +1,399 @@
+From 8defb806f86a3ebf07001ba6014789be2b7c0e12 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Sun, 16 Aug 2026 14:38:03 +0200
+Subject: [PATCH] KHopeSpigot: performance diagnostics core
+
+---
+ .../command/KhopeMiningCommand.java           |  31 +-
+ .../util/KhopePerformanceDiagnostics.java     | 280 ++++++++++++++++++
+ .../net/minecraft/server/MinecraftServer.java |  14 +
+ 3 files changed, 323 insertions(+), 2 deletions(-)
+ create mode 100644 src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/command/KhopeMiningCommand.java b/src/main/java/com/hpfxd/pandaspigot/command/KhopeMiningCommand.java
+index 73e5ff94e..6f66c7707 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/command/KhopeMiningCommand.java
++++ b/src/main/java/com/hpfxd/pandaspigot/command/KhopeMiningCommand.java
+@@ -46,7 +46,16 @@ public class KhopeMiningCommand extends Command {
+             return true;
+         }
+ 
+-        if (args.length == 0 || !"mining".equalsIgnoreCase(args[0])) {
++        if (args.length == 0) {
++            sendUsage(sender);
++            return true;
++        }
++
++        if ("perf".equalsIgnoreCase(args[0])) {
++            return handlePerf(sender, args);
++        }
++
++        if (!"mining".equalsIgnoreCase(args[0])) {
+             sendUsage(sender);
+             return true;
+         }
+@@ -74,6 +83,22 @@ public class KhopeMiningCommand extends Command {
+         return true;
+     }
+ 
++    private boolean handlePerf(CommandSender sender, String[] args) {
++        if (args.length == 1 || "status".equalsIgnoreCase(args[1])) {
++            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.sendReport(sender);
++            return true;
++        }
++
++        if ("reset".equalsIgnoreCase(args[1])) {
++            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.reset();
++            sender.sendMessage(ChatColor.GREEN + "[KHOPE-PERF] Compteurs reinitialises.");
++            return true;
++        }
++
++        sender.sendMessage(ChatColor.GOLD + "/khope perf [status|reset]");
++        return true;
++    }
++
+     private boolean handleReload(CommandSender sender) {
+         try {
+             File file = (File) MinecraftServer.getServer().options.valueOf("sparrow-mining");
+@@ -146,6 +171,7 @@ public class KhopeMiningCommand extends Command {
+     }
+ 
+     private void sendUsage(CommandSender sender) {
++        sender.sendMessage(ChatColor.GOLD + "/khope perf [status|reset]");
+         sender.sendMessage(ChatColor.GOLD + "/khope mining debug on|off|status|sim <MATERIAL>");
+         sender.sendMessage(ChatColor.GOLD + "/khope mining reload");
+         sender.sendMessage(ChatColor.GOLD + "/khope mining give <joueur> <profil> [mr_level]");
+@@ -283,7 +309,8 @@ public class KhopeMiningCommand extends Command {
+     @Override
+     public List<String> tabComplete(CommandSender sender, String alias, String[] args) {
+         if (!sender.isOp()) return java.util.Collections.emptyList();
+-        if (args.length == 1) return Arrays.asList("mining");
++        if (args.length == 1) return Arrays.asList("mining", "perf");
++        if (args.length == 2 && "perf".equalsIgnoreCase(args[0])) return Arrays.asList("status", "reset");
+         if (args.length == 2) return Arrays.asList("debug", "reload", "give");
+         if (args.length == 3 && "debug".equalsIgnoreCase(args[1])) {
+             return Arrays.asList("on", "off", "status", "sim");
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+new file mode 100644
+index 000000000..ce857f405
+--- /dev/null
++++ b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+@@ -0,0 +1,280 @@
++package com.hpfxd.pandaspigot.util;
++
++import java.lang.management.GarbageCollectorMXBean;
++import java.lang.management.ManagementFactory;
++import java.util.Arrays;
++import java.util.List;
++import java.util.Locale;
++
++import org.bukkit.ChatColor;
++import org.bukkit.command.CommandSender;
++
++/**
++ * Low-overhead diagnostics for the KHopeSpigot server tick loop.
++ *
++ * The hot path uses only primitive counters and two preallocated long arrays.
++ * Sorting/allocation for percentiles happens only when /khope perf is requested.
++ *
++ * All methods are expected to be called from the primary server thread.
++ */
++public final class KhopePerformanceDiagnostics {
++
++    private static final int SAMPLE_CAPACITY = 8192;
++
++    private static final long[] TICK_NANOS = new long[SAMPLE_CAPACITY];
++    private static final long[] WAIT_NANOS = new long[SAMPLE_CAPACITY];
++
++    private static long windowStartNanos = System.nanoTime();
++
++    private static long tickCount;
++    private static long tickTotalNanos;
++    private static long tickMaxNanos;
++    private static long tickOver10Ms;
++    private static long tickOver25Ms;
++    private static long tickOver50Ms;
++    private static int tickSampleIndex;
++    private static int tickSampleCount;
++
++    private static long waitCount;
++    private static long waitTotalNanos;
++    private static long waitMaxNanos;
++    private static long parkCalls;
++    private static int waitSampleIndex;
++    private static int waitSampleCount;
++
++    private static long gcCollectionsBaseline = readGcCollections();
++    private static long gcTimeMillisBaseline = readGcTimeMillis();
++
++    private KhopePerformanceDiagnostics() {
++    }
++
++    public static void recordTick(long nanos) {
++        if (nanos < 0L) {
++            return;
++        }
++
++        ++tickCount;
++        tickTotalNanos += nanos;
++
++        if (nanos > tickMaxNanos) {
++            tickMaxNanos = nanos;
++        }
++        if (nanos > 10_000_000L) {
++            ++tickOver10Ms;
++        }
++        if (nanos > 25_000_000L) {
++            ++tickOver25Ms;
++        }
++        if (nanos > 50_000_000L) {
++            ++tickOver50Ms;
++        }
++
++        TICK_NANOS[tickSampleIndex] = nanos;
++        if (++tickSampleIndex == SAMPLE_CAPACITY) {
++            tickSampleIndex = 0;
++        }
++        if (tickSampleCount < SAMPLE_CAPACITY) {
++            ++tickSampleCount;
++        }
++    }
++
++    public static void recordWait(long nanos, int parks) {
++        if (nanos < 0L) {
++            return;
++        }
++
++        ++waitCount;
++        waitTotalNanos += nanos;
++
++        if (nanos > waitMaxNanos) {
++            waitMaxNanos = nanos;
++        }
++        if (parks > 0) {
++            parkCalls += parks;
++        }
++
++        WAIT_NANOS[waitSampleIndex] = nanos;
++        if (++waitSampleIndex == SAMPLE_CAPACITY) {
++            waitSampleIndex = 0;
++        }
++        if (waitSampleCount < SAMPLE_CAPACITY) {
++            ++waitSampleCount;
++        }
++    }
++
++    public static void reset() {
++        Arrays.fill(TICK_NANOS, 0L);
++        Arrays.fill(WAIT_NANOS, 0L);
++
++        tickCount = 0L;
++        tickTotalNanos = 0L;
++        tickMaxNanos = 0L;
++        tickOver10Ms = 0L;
++        tickOver25Ms = 0L;
++        tickOver50Ms = 0L;
++        tickSampleIndex = 0;
++        tickSampleCount = 0;
++
++        waitCount = 0L;
++        waitTotalNanos = 0L;
++        waitMaxNanos = 0L;
++        parkCalls = 0L;
++        waitSampleIndex = 0;
++        waitSampleCount = 0;
++
++        windowStartNanos = System.nanoTime();
++        gcCollectionsBaseline = readGcCollections();
++        gcTimeMillisBaseline = readGcTimeMillis();
++    }
++
++    public static void sendReport(CommandSender sender) {
++        final long now = System.nanoTime();
++        final long elapsedNanos = Math.max(0L, now - windowStartNanos);
++
++        final long[] ticks = snapshot(TICK_NANOS, tickSampleIndex, tickSampleCount);
++        final long[] waits = snapshot(WAIT_NANOS, waitSampleIndex, waitSampleCount);
++        Arrays.sort(ticks);
++        Arrays.sort(waits);
++
++        final long gcCollectionsDelta =
++                nonNegativeDelta(readGcCollections(), gcCollectionsBaseline);
++        final long gcTimeMillisDelta =
++                nonNegativeDelta(readGcTimeMillis(), gcTimeMillisBaseline);
++
++        sender.sendMessage(ChatColor.GOLD + "========== KHope Performance ==========");
++        sender.sendMessage(ChatColor.GRAY + "Fenetre: " + ChatColor.YELLOW + formatDuration(elapsedNanos)
++                + ChatColor.GRAY + " | ticks: " + ChatColor.YELLOW + tickCount
++                + ChatColor.GRAY + " | samples: " + ChatColor.YELLOW + tickSampleCount);
++
++        if (tickCount == 0L) {
++            sender.sendMessage(ChatColor.YELLOW + "Aucun tick mesure depuis le dernier reset.");
++        } else {
++            sender.sendMessage(ChatColor.GRAY + "MSPT actif avg: " + ChatColor.GREEN
++                    + formatMs(tickTotalNanos / tickCount)
++                    + ChatColor.GRAY + " | p50: " + ChatColor.GREEN + formatMs(percentile(ticks, 50))
++                    + ChatColor.GRAY + " | p95: " + ChatColor.YELLOW + formatMs(percentile(ticks, 95)));
++
++            sender.sendMessage(ChatColor.GRAY + "MSPT actif p99: " + ChatColor.YELLOW
++                    + formatMs(percentile(ticks, 99))
++                    + ChatColor.GRAY + " | max: " + ChatColor.RED + formatMs(tickMaxNanos));
++
++            sender.sendMessage(ChatColor.GRAY + "Ticks lents >10ms: " + ChatColor.YELLOW + tickOver10Ms
++                    + ChatColor.GRAY + " | >25ms: " + ChatColor.GOLD + tickOver25Ms
++                    + ChatColor.GRAY + " | >50ms: " + ChatColor.RED + tickOver50Ms);
++        }
++
++        if (waitCount > 0L) {
++            sender.sendMessage(ChatColor.GRAY + "Attente avg: " + ChatColor.GREEN
++                    + formatMs(waitTotalNanos / waitCount)
++                    + ChatColor.GRAY + " | p95: " + ChatColor.YELLOW + formatMs(percentile(waits, 95))
++                    + ChatColor.GRAY + " | max: " + ChatColor.RED + formatMs(waitMaxNanos));
++
++            sender.sendMessage(ChatColor.GRAY + "parkNanos calls: " + ChatColor.YELLOW + parkCalls
++                    + ChatColor.GRAY + " | avg/tick: " + ChatColor.YELLOW
++                    + formatDouble((double) parkCalls / (double) waitCount));
++        }
++
++        sender.sendMessage(ChatColor.GRAY + "GC depuis reset: collections="
++                + ChatColor.YELLOW + gcCollectionsDelta
++                + ChatColor.GRAY + " | pause=" + ChatColor.YELLOW + gcTimeMillisDelta + "ms");
++
++        sender.sendMessage(ChatColor.DARK_GRAY
++                + "MSPT actif = travail du thread serveur avant l'attente du tick suivant.");
++    }
++
++    private static long[] snapshot(long[] source, int nextIndex, int count) {
++        if (count <= 0) {
++            return new long[0];
++        }
++
++        final long[] copy = new long[count];
++
++        if (count < SAMPLE_CAPACITY) {
++            System.arraycopy(source, 0, copy, 0, count);
++            return copy;
++        }
++
++        final int tail = SAMPLE_CAPACITY - nextIndex;
++        System.arraycopy(source, nextIndex, copy, 0, tail);
++
++        if (nextIndex > 0) {
++            System.arraycopy(source, 0, copy, tail, nextIndex);
++        }
++
++        return copy;
++    }
++
++    private static long percentile(long[] sorted, int percentile) {
++        if (sorted.length == 0) {
++            return 0L;
++        }
++
++        int index = (int) Math.ceil((percentile / 100.0D) * sorted.length) - 1;
++
++        if (index < 0) {
++            index = 0;
++        } else if (index >= sorted.length) {
++            index = sorted.length - 1;
++        }
++
++        return sorted[index];
++    }
++
++    private static long readGcCollections() {
++        long total = 0L;
++        final List<GarbageCollectorMXBean> beans =
++                ManagementFactory.getGarbageCollectorMXBeans();
++
++        for (GarbageCollectorMXBean bean : beans) {
++            final long value = bean.getCollectionCount();
++            if (value > 0L) {
++                total += value;
++            }
++        }
++
++        return total;
++    }
++
++    private static long readGcTimeMillis() {
++        long total = 0L;
++        final List<GarbageCollectorMXBean> beans =
++                ManagementFactory.getGarbageCollectorMXBeans();
++
++        for (GarbageCollectorMXBean bean : beans) {
++            final long value = bean.getCollectionTime();
++            if (value > 0L) {
++                total += value;
++            }
++        }
++
++        return total;
++    }
++
++    private static long nonNegativeDelta(long current, long baseline) {
++        return current >= baseline ? current - baseline : current;
++    }
++
++    private static String formatMs(long nanos) {
++        return String.format(Locale.ROOT, "%.3fms", nanos / 1_000_000.0D);
++    }
++
++    private static String formatDouble(double value) {
++        return String.format(Locale.ROOT, "%.2f", value);
++    }
++
++    private static String formatDuration(long nanos) {
++        long seconds = nanos / 1_000_000_000L;
++        long minutes = seconds / 60L;
++        final long remainingSeconds = seconds % 60L;
++        final long hours = minutes / 60L;
++        minutes %= 60L;
++
++        if (hours > 0L) {
++            return hours + "h " + minutes + "m " + remainingSeconds + "s";
++        }
++        if (minutes > 0L) {
++            return minutes + "m " + remainingSeconds + "s";
++        }
++        return remainingSeconds + "s";
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index ae0259e02..113f7a144 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -594,6 +594,9 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                 // PandaSpigot end
+                 // PaperSpigot end
+                 while (this.isRunning) {
++                    // KHopeSpigot start - F0.1 performance diagnostics
++                    final long khopeLoopStartNanos = System.nanoTime();
++                    // KHopeSpigot end
+                     // PandaSpigot start - New Tick Loop System
+                     curTime = System.nanoTime();
+                     long i = az() - this.ab;
+@@ -650,9 +653,20 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                     // PandaSpigot start - New Tick Loop System
+                     this.ab += 50L;
+ 
++                    // KHopeSpigot start - F0.1 active work / pacing diagnostics
++                    final long khopeWaitStartNanos = System.nanoTime();
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordTick(
++                            khopeWaitStartNanos - khopeLoopStartNanos);
++
++                    int khopeParkCalls = 0;
+                     while(this.isAheadOfTime()) {
+                         java.util.concurrent.locks.LockSupport.parkNanos(1_000_000);
++                        ++khopeParkCalls;
+                     }
++
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordWait(
++                            System.nanoTime() - khopeWaitStartNanos, khopeParkCalls);
++                    // KHopeSpigot end
+                     // PandaSpigot end
+ 
+                     this.Q = true;
+-- 
+2.51.0.windows.1
+
