@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KHopeSpigot <fork@localhost>
+Date: Sun, 16 Aug 2026 12:41:00 +0200
+Subject: [PATCH] KHopeSpigot: fast-path post craft and breed events
+
+Avoid Bukkit conversion, matrix snapshots and event construction when no plugin
+listens to the corresponding post event. When PostCraftItemEvent is observed,
+use its trusted server snapshot factory so each matrix is copied only once.
+
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalBreed.java b/src/main/java/net/minecraft/server/PathfinderGoalBreed.java
+--- a/src/main/java/net/minecraft/server/PathfinderGoalBreed.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalBreed.java
+@@ -97,6 +97,8 @@ public class PathfinderGoalBreed extends PathfinderGoal {
+             boolean childSpawned = this.a.addEntity(entityageable,
+                     org.bukkit.event.entity.CreatureSpawnEvent.SpawnReason.BREEDING); // CraftBukkit - added SpawnReason
+             if (childSpawned && entityhuman != null
++                    && com.hpfxd.pandaspigot.event.entity.PostEntityBreedEvent
++                        .getHandlerList().getRegisteredListeners().length != 0
+                     && entityhuman.getBukkitEntity() instanceof org.bukkit.entity.Player
+                     && this.d.getBukkitEntity() instanceof org.bukkit.entity.Animals
+                     && this.e.getBukkitEntity() instanceof org.bukkit.entity.Animals
+diff --git a/src/main/java/net/minecraft/server/SlotResult.java b/src/main/java/net/minecraft/server/SlotResult.java
+--- a/src/main/java/net/minecraft/server/SlotResult.java
++++ b/src/main/java/net/minecraft/server/SlotResult.java
+@@ -91,13 +91,26 @@ public class SlotResult extends Slot {
+
+     @Override
+     public void a(EntityHuman entityhuman, ItemStack itemstack) {
+-        int craftedAmount = this.c;
+-        Recipe completedRecipe = this.a.currentRecipe == null
+-                ? null : this.a.currentRecipe.toBukkitRecipe();
+-        org.bukkit.inventory.ItemStack craftedResult =
+-                toCraftedResult(itemstack, craftedAmount);
+-        org.bukkit.inventory.ItemStack[] matrixBefore =
+-                snapshotMatrix(this.a);
++        // KHopeSpigot start - zero-allocation fast path when nobody observes
++        // PostCraftItemEvent. This method is on the vanilla crafting hot path.
++        boolean firePostCraft = PostCraftItemEvent.getHandlerList()
++                .getRegisteredListeners().length != 0;
++        Recipe completedRecipe = null;
++        org.bukkit.inventory.ItemStack craftedResult = null;
++        org.bukkit.inventory.ItemStack[] matrixBefore = null;
++
++        if (firePostCraft) {
++            int craftedAmount = this.c;
++            completedRecipe = this.a.currentRecipe == null
++                    ? null : this.a.currentRecipe.toBukkitRecipe();
++            if (completedRecipe != null) {
++                craftedResult = toCraftedResult(itemstack, craftedAmount);
++                if (craftedResult != null) {
++                    matrixBefore = snapshotMatrix(this.a);
++                }
++            }
++        }
++        // KHopeSpigot end
+
+         this.c(itemstack);
+         ItemStack[] aitemstack = CraftingManager.getInstance().b(this.a, entityhuman.world);
+@@ -119,10 +132,10 @@ public class SlotResult extends Slot {
+             }
+         }
+
+-        if (completedRecipe != null && craftedResult != null
++        if (firePostCraft && completedRecipe != null && craftedResult != null
+                 && entityhuman.getBukkitEntity() instanceof org.bukkit.entity.Player) {
+             entityhuman.world.getServer().getPluginManager().callEvent(
+-                    new PostCraftItemEvent(
++                    PostCraftItemEvent.fromServerSnapshots(
+                             (org.bukkit.entity.Player) entityhuman.getBukkitEntity(),
+                             completedRecipe, craftedResult, matrixBefore));
+         }

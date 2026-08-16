@@ -1,0 +1,63 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: KHopeSpigot <fork@localhost>
+Date: Sun, 16 Aug 2026 12:40:00 +0200
+Subject: [PATCH] KHopeSpigot: avoid duplicate post-craft snapshots
+
+Keep the public defensive constructor semantics while exposing a server-side
+factory for snapshots that are already detached from NMS state. Getters remain
+defensive.
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/event/inventory/PostCraftItemEvent.java b/src/main/java/com/hpfxd/pandaspigot/event/inventory/PostCraftItemEvent.java
+--- a/src/main/java/com/hpfxd/pandaspigot/event/inventory/PostCraftItemEvent.java
++++ b/src/main/java/com/hpfxd/pandaspigot/event/inventory/PostCraftItemEvent.java
+@@ -26,16 +26,46 @@ public final class PostCraftItemEvent extends PlayerEvent {
+     private final ItemStack result;
+     private final ItemStack[] matrix;
+
+     public PostCraftItemEvent(Player player, Recipe recipe, ItemStack result,
+             ItemStack[] matrix) {
++        this(player, recipe, result, matrix, false);
++    }
++
++    /**
++     * Creates an event from snapshots already detached from server/NMS state.
++     *
++     * <p>This method exists for the server implementation so it does not clone
++     * a matrix twice before firing the event. Plugins should normally use the
++     * public constructor instead.</p>
++     *
++     * <p>The event still returns defensive copies from its getters.</p>
++     *
++     * @param player player that completed the craft
++     * @param recipe completed recipe
++     * @param result detached crafted-result snapshot
++     * @param matrix detached pre-consumption matrix snapshot
++     * @return event backed by the supplied detached snapshots
++     */
++    public static PostCraftItemEvent fromServerSnapshots(Player player,
++            Recipe recipe, ItemStack result, ItemStack[] matrix) {
++        return new PostCraftItemEvent(player, recipe, result, matrix, true);
++    }
++
++    private PostCraftItemEvent(Player player, Recipe recipe, ItemStack result,
++            ItemStack[] matrix, boolean trustedSnapshots) {
+         super(player);
+         if (recipe == null) {
+             throw new IllegalArgumentException("recipe cannot be null");
+         }
+         if (result == null || result.getTypeId() <= 0 || result.getAmount() <= 0) {
+             throw new IllegalArgumentException("result must be a present item stack");
+         }
+         this.recipe = recipe;
+-        this.result = result.clone();
+-        this.matrix = cloneMatrix(matrix);
++        if (trustedSnapshots) {
++            this.result = result;
++            this.matrix = matrix == null ? new ItemStack[0] : matrix;
++        } else {
++            this.result = result.clone();
++            this.matrix = cloneMatrix(matrix);
++        }
+     }
+
+     public Recipe getRecipe() {
