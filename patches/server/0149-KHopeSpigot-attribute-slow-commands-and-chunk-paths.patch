@@ -1,0 +1,579 @@
+From 73b9ff0ef4a77aa16ae0233da32d89a0bfa102d3 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Sun, 16 Aug 2026 21:56:11 +0200
+Subject: [PATCH] KHopeSpigot: attribute slow commands and chunk paths
+
+---
+ .../util/KhopePerformanceDiagnostics.java     | 338 ++++++++++++++++++
+ .../minecraft/server/ChunkProviderServer.java |  59 ++-
+ .../net/minecraft/server/MinecraftServer.java |   5 +
+ .../minecraft/server/PlayerConnection.java    |  52 ++-
+ 4 files changed, 434 insertions(+), 20 deletions(-)
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+index 411009f40..7e00b5179 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
++++ b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+@@ -129,6 +129,68 @@ public final class KhopePerformanceDiagnostics {
+     private static long worstTickJobWorkNanos;
+     private static long worstTickJobMaxNanos;
+ 
++    // 0149 - slow command / synchronous chunk-path attribution.
++    // These counters are only touched while /khope perf jobs is active.
++    private static long commandCount;
++    private static long commandTotalNanos;
++    private static long commandMaxNanos;
++    private static String worstCommand = "-";
++
++    private static long loadedChunkHits;
++    private static long chunkExistsChecks;
++    private static long chunkExistsCheckTotalNanos;
++    private static long chunkExistsCheckMaxNanos;
++    private static long asyncChunkQueues;
++
++    private static long syncChunkLoads;
++    private static long syncChunkLoadTotalNanos;
++    private static long syncChunkLoadMaxNanos;
++
++    private static long directChunkLoads;
++    private static long directChunkLoadTotalNanos;
++    private static long directChunkLoadMaxNanos;
++
++    private static long chunkGenerations;
++    private static long chunkGenerationTotalNanos;
++    private static long chunkGenerationMaxNanos;
++
++    private static long chunkFinalizations;
++    private static long chunkFinalizeTotalNanos;
++    private static long chunkFinalizeMaxNanos;
++
++    // Current FutureTask context. Main-thread only while jobs tracing is active.
++    private static boolean jobTraceActive;
++    private static String currentJobCommand = "-";
++    private static long currentJobCommandNanos;
++    private static long currentJobLoadedHits;
++    private static long currentJobChunkExistsChecks;
++    private static long currentJobChunkExistsNanos;
++    private static long currentJobAsyncChunkQueues;
++    private static long currentJobSyncChunkLoads;
++    private static long currentJobSyncChunkLoadNanos;
++    private static long currentJobDirectChunkLoads;
++    private static long currentJobDirectChunkLoadNanos;
++    private static long currentJobChunkGenerations;
++    private static long currentJobChunkGenerationNanos;
++    private static long currentJobChunkFinalizations;
++    private static long currentJobChunkFinalizeNanos;
++
++    private static long worstTracedJobNanos;
++    private static String worstTracedJobCommand = "-";
++    private static long worstTracedJobCommandNanos;
++    private static long worstTracedJobLoadedHits;
++    private static long worstTracedJobChunkExistsChecks;
++    private static long worstTracedJobChunkExistsNanos;
++    private static long worstTracedJobAsyncChunkQueues;
++    private static long worstTracedJobSyncChunkLoads;
++    private static long worstTracedJobSyncChunkLoadNanos;
++    private static long worstTracedJobDirectChunkLoads;
++    private static long worstTracedJobDirectChunkLoadNanos;
++    private static long worstTracedJobChunkGenerations;
++    private static long worstTracedJobChunkGenerationNanos;
++    private static long worstTracedJobChunkFinalizations;
++    private static long worstTracedJobChunkFinalizeNanos;
++
+     private static boolean skipCurrentTick;
+     private static boolean skipCurrentWait;
+ 
+@@ -163,6 +225,155 @@ public final class KhopePerformanceDiagnostics {
+         return jobsThisTick;
+     }
+ 
++    /**
++     * True only during an explicit /khope perf jobs capture on the primary
++     * server thread. Normal production mode has no command/chunk tracing.
++     */
++    public static boolean isSlowPathCaptureEnabled() {
++        return jobsThisTick && MinecraftServer.getServer().isMainThread();
++    }
++
++    public static void beginJobTrace() {
++        if (!isSlowPathCaptureEnabled()) {
++            jobTraceActive = false;
++            return;
++        }
++
++        jobTraceActive = true;
++        currentJobCommand = "-";
++        currentJobCommandNanos = 0L;
++        currentJobLoadedHits = 0L;
++        currentJobChunkExistsChecks = 0L;
++        currentJobChunkExistsNanos = 0L;
++        currentJobAsyncChunkQueues = 0L;
++        currentJobSyncChunkLoads = 0L;
++        currentJobSyncChunkLoadNanos = 0L;
++        currentJobDirectChunkLoads = 0L;
++        currentJobDirectChunkLoadNanos = 0L;
++        currentJobChunkGenerations = 0L;
++        currentJobChunkGenerationNanos = 0L;
++        currentJobChunkFinalizations = 0L;
++        currentJobChunkFinalizeNanos = 0L;
++    }
++
++    public static void endJobTrace(long jobNanos) {
++        if (!jobTraceActive) {
++            return;
++        }
++
++        if (jobNanos > worstTracedJobNanos) {
++            worstTracedJobNanos = jobNanos;
++            worstTracedJobCommand = currentJobCommand;
++            worstTracedJobCommandNanos = currentJobCommandNanos;
++            worstTracedJobLoadedHits = currentJobLoadedHits;
++            worstTracedJobChunkExistsChecks = currentJobChunkExistsChecks;
++            worstTracedJobChunkExistsNanos = currentJobChunkExistsNanos;
++            worstTracedJobAsyncChunkQueues = currentJobAsyncChunkQueues;
++            worstTracedJobSyncChunkLoads = currentJobSyncChunkLoads;
++            worstTracedJobSyncChunkLoadNanos = currentJobSyncChunkLoadNanos;
++            worstTracedJobDirectChunkLoads = currentJobDirectChunkLoads;
++            worstTracedJobDirectChunkLoadNanos = currentJobDirectChunkLoadNanos;
++            worstTracedJobChunkGenerations = currentJobChunkGenerations;
++            worstTracedJobChunkGenerationNanos = currentJobChunkGenerationNanos;
++            worstTracedJobChunkFinalizations = currentJobChunkFinalizations;
++            worstTracedJobChunkFinalizeNanos = currentJobChunkFinalizeNanos;
++        }
++
++        jobTraceActive = false;
++    }
++
++    public static void recordPlayerCommand(String rawCommand, long nanos) {
++        if (!isSlowPathCaptureEnabled() || nanos < 0L) {
++            return;
++        }
++
++        final String command = commandLabel(rawCommand);
++        ++commandCount;
++        commandTotalNanos += nanos;
++
++        if (nanos > commandMaxNanos) {
++            commandMaxNanos = nanos;
++            worstCommand = command;
++        }
++
++        if (jobTraceActive && nanos > currentJobCommandNanos) {
++            currentJobCommand = command;
++            currentJobCommandNanos = nanos;
++        }
++    }
++
++    public static void recordLoadedChunkHit() {
++        if (!isSlowPathCaptureEnabled()) return;
++        ++loadedChunkHits;
++        if (jobTraceActive) ++currentJobLoadedHits;
++    }
++
++    public static void recordChunkExistsCheck(long nanos) {
++        if (!isSlowPathCaptureEnabled() || nanos < 0L) return;
++        ++chunkExistsChecks;
++        chunkExistsCheckTotalNanos += nanos;
++        if (nanos > chunkExistsCheckMaxNanos) chunkExistsCheckMaxNanos = nanos;
++
++        if (jobTraceActive) {
++            ++currentJobChunkExistsChecks;
++            currentJobChunkExistsNanos += nanos;
++        }
++    }
++
++    public static void recordAsyncChunkQueue() {
++        if (!isSlowPathCaptureEnabled()) return;
++        ++asyncChunkQueues;
++        if (jobTraceActive) ++currentJobAsyncChunkQueues;
++    }
++
++    public static void recordSyncChunkLoad(long nanos) {
++        if (!isSlowPathCaptureEnabled() || nanos < 0L) return;
++        ++syncChunkLoads;
++        syncChunkLoadTotalNanos += nanos;
++        if (nanos > syncChunkLoadMaxNanos) syncChunkLoadMaxNanos = nanos;
++
++        if (jobTraceActive) {
++            ++currentJobSyncChunkLoads;
++            currentJobSyncChunkLoadNanos += nanos;
++        }
++    }
++
++    public static void recordDirectChunkLoad(long nanos) {
++        if (!isSlowPathCaptureEnabled() || nanos < 0L) return;
++        ++directChunkLoads;
++        directChunkLoadTotalNanos += nanos;
++        if (nanos > directChunkLoadMaxNanos) directChunkLoadMaxNanos = nanos;
++
++        if (jobTraceActive) {
++            ++currentJobDirectChunkLoads;
++            currentJobDirectChunkLoadNanos += nanos;
++        }
++    }
++
++    public static void recordChunkGeneration(long nanos) {
++        if (!isSlowPathCaptureEnabled() || nanos < 0L) return;
++        ++chunkGenerations;
++        chunkGenerationTotalNanos += nanos;
++        if (nanos > chunkGenerationMaxNanos) chunkGenerationMaxNanos = nanos;
++
++        if (jobTraceActive) {
++            ++currentJobChunkGenerations;
++            currentJobChunkGenerationNanos += nanos;
++        }
++    }
++
++    public static void recordChunkFinalization(long nanos) {
++        if (!isSlowPathCaptureEnabled() || nanos < 0L) return;
++        ++chunkFinalizations;
++        chunkFinalizeTotalNanos += nanos;
++        if (nanos > chunkFinalizeMaxNanos) chunkFinalizeMaxNanos = nanos;
++
++        if (jobTraceActive) {
++            ++currentJobChunkFinalizations;
++            currentJobChunkFinalizeNanos += nanos;
++        }
++    }
++
+     public static void recordSection(int section, long nanos) {
+         if (!detailThisTick
+                 || section < 0
+@@ -425,6 +636,63 @@ public final class KhopePerformanceDiagnostics {
+                         + ChatColor.GRAY + " | work=" + ChatColor.YELLOW + formatMs(worstTickJobWorkNanos)
+                         + ChatColor.GRAY + " | max single=" + ChatColor.RED + formatMs(worstTickJobMaxNanos));
+             }
++
++            if (commandCount > 0L || syncChunkLoads > 0L || chunkGenerations > 0L
++                    || directChunkLoads > 0L || chunkExistsChecks > 0L) {
++                sender.sendMessage(ChatColor.GOLD + "--- Slow command / chunk path 0149 ---");
++
++                if (commandCount > 0L) {
++                    sender.sendMessage(ChatColor.GRAY + "Commands: " + ChatColor.YELLOW + commandCount
++                            + ChatColor.GRAY + " | avg " + ChatColor.GREEN
++                            + formatMs(commandTotalNanos / commandCount)
++                            + ChatColor.GRAY + " | max " + ChatColor.RED + formatMs(commandMaxNanos)
++                            + ChatColor.GRAY + " | worst " + ChatColor.YELLOW + worstCommand);
++                }
++
++                sender.sendMessage(ChatColor.GRAY + "Chunk loaded hits: " + ChatColor.YELLOW + loadedChunkHits
++                        + ChatColor.GRAY + " | exists checks: " + ChatColor.YELLOW + chunkExistsChecks
++                        + ChatColor.GRAY + " / " + formatMs(chunkExistsCheckTotalNanos)
++                        + ChatColor.GRAY + " max " + ChatColor.RED + formatMs(chunkExistsCheckMaxNanos)
++                        + ChatColor.GRAY + " | async queued: " + ChatColor.YELLOW + asyncChunkQueues);
++
++                sender.sendMessage(ChatColor.GRAY + "Sync chunk loads: " + ChatColor.YELLOW + syncChunkLoads
++                        + ChatColor.GRAY + " / " + formatMs(syncChunkLoadTotalNanos)
++                        + ChatColor.GRAY + " max " + ChatColor.RED + formatMs(syncChunkLoadMaxNanos));
++
++                sender.sendMessage(ChatColor.GRAY + "Direct loadChunk: " + ChatColor.YELLOW + directChunkLoads
++                        + ChatColor.GRAY + " / " + formatMs(directChunkLoadTotalNanos)
++                        + ChatColor.GRAY + " max " + ChatColor.RED + formatMs(directChunkLoadMaxNanos));
++
++                sender.sendMessage(ChatColor.GRAY + "Chunk generation: " + ChatColor.YELLOW + chunkGenerations
++                        + ChatColor.GRAY + " / " + formatMs(chunkGenerationTotalNanos)
++                        + ChatColor.GRAY + " max " + ChatColor.RED + formatMs(chunkGenerationMaxNanos));
++
++                sender.sendMessage(ChatColor.GRAY + "Chunk finalize/events: " + ChatColor.YELLOW + chunkFinalizations
++                        + ChatColor.GRAY + " / " + formatMs(chunkFinalizeTotalNanos)
++                        + ChatColor.GRAY + " max " + ChatColor.RED + formatMs(chunkFinalizeMaxNanos));
++            }
++
++            if (worstTracedJobNanos > 0L) {
++                sender.sendMessage(ChatColor.GOLD + "--- Worst FutureTask attribution ---");
++                sender.sendMessage(ChatColor.GRAY + "Task: " + ChatColor.RED + formatMs(worstTracedJobNanos)
++                        + ChatColor.GRAY + " | command " + ChatColor.YELLOW + worstTracedJobCommand
++                        + ChatColor.GRAY + " / " + formatMs(worstTracedJobCommandNanos));
++
++                sender.sendMessage(ChatColor.GRAY + "Loaded hits=" + worstTracedJobLoadedHits
++                        + " exists=" + worstTracedJobChunkExistsChecks
++                        + "/" + formatMs(worstTracedJobChunkExistsNanos)
++                        + " asyncQ=" + worstTracedJobAsyncChunkQueues);
++
++                sender.sendMessage(ChatColor.GRAY + "SyncLoad=" + worstTracedJobSyncChunkLoads
++                        + "/" + formatMs(worstTracedJobSyncChunkLoadNanos)
++                        + " direct=" + worstTracedJobDirectChunkLoads
++                        + "/" + formatMs(worstTracedJobDirectChunkLoadNanos));
++
++                sender.sendMessage(ChatColor.GRAY + "Generate=" + worstTracedJobChunkGenerations
++                        + "/" + formatMs(worstTracedJobChunkGenerationNanos)
++                        + " finalize=" + worstTracedJobChunkFinalizations
++                        + "/" + formatMs(worstTracedJobChunkFinalizeNanos));
++            }
+         } else {
+             sender.sendMessage(ChatColor.DARK_GRAY
+                     + "Aucune capture detaillee. Utilise /khope perf detail 60 ou jobs 30.");
+@@ -559,6 +827,76 @@ public final class KhopePerformanceDiagnostics {
+         worstTickJobCount = 0;
+         worstTickJobWorkNanos = 0L;
+         worstTickJobMaxNanos = 0L;
++
++        commandCount = 0L;
++        commandTotalNanos = 0L;
++        commandMaxNanos = 0L;
++        worstCommand = "-";
++
++        loadedChunkHits = 0L;
++        chunkExistsChecks = 0L;
++        chunkExistsCheckTotalNanos = 0L;
++        chunkExistsCheckMaxNanos = 0L;
++        asyncChunkQueues = 0L;
++
++        syncChunkLoads = 0L;
++        syncChunkLoadTotalNanos = 0L;
++        syncChunkLoadMaxNanos = 0L;
++        directChunkLoads = 0L;
++        directChunkLoadTotalNanos = 0L;
++        directChunkLoadMaxNanos = 0L;
++        chunkGenerations = 0L;
++        chunkGenerationTotalNanos = 0L;
++        chunkGenerationMaxNanos = 0L;
++        chunkFinalizations = 0L;
++        chunkFinalizeTotalNanos = 0L;
++        chunkFinalizeMaxNanos = 0L;
++
++        jobTraceActive = false;
++        currentJobCommand = "-";
++        currentJobCommandNanos = 0L;
++        currentJobLoadedHits = 0L;
++        currentJobChunkExistsChecks = 0L;
++        currentJobChunkExistsNanos = 0L;
++        currentJobAsyncChunkQueues = 0L;
++        currentJobSyncChunkLoads = 0L;
++        currentJobSyncChunkLoadNanos = 0L;
++        currentJobDirectChunkLoads = 0L;
++        currentJobDirectChunkLoadNanos = 0L;
++        currentJobChunkGenerations = 0L;
++        currentJobChunkGenerationNanos = 0L;
++        currentJobChunkFinalizations = 0L;
++        currentJobChunkFinalizeNanos = 0L;
++
++        worstTracedJobNanos = 0L;
++        worstTracedJobCommand = "-";
++        worstTracedJobCommandNanos = 0L;
++        worstTracedJobLoadedHits = 0L;
++        worstTracedJobChunkExistsChecks = 0L;
++        worstTracedJobChunkExistsNanos = 0L;
++        worstTracedJobAsyncChunkQueues = 0L;
++        worstTracedJobSyncChunkLoads = 0L;
++        worstTracedJobSyncChunkLoadNanos = 0L;
++        worstTracedJobDirectChunkLoads = 0L;
++        worstTracedJobDirectChunkLoadNanos = 0L;
++        worstTracedJobChunkGenerations = 0L;
++        worstTracedJobChunkGenerationNanos = 0L;
++        worstTracedJobChunkFinalizations = 0L;
++        worstTracedJobChunkFinalizeNanos = 0L;
++    }
++
++    private static String commandLabel(String command) {
++        if (command == null || command.length() == 0) {
++            return "-";
++        }
++
++        final int length = command.length();
++        int end = 0;
++        while (end < length && !Character.isWhitespace(command.charAt(end))) {
++            ++end;
++        }
++
++        return end == length ? command : command.substring(0, end);
+     }
+ 
+     private static void finalizeBreakdown(long activeNanos) {
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index 041ede285..a2811e076 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -123,17 +123,45 @@ public class ChunkProviderServer implements IChunkProvider {
+         Chunk chunk = chunks.get(LongHash.toLong(i, j));
+         ChunkRegionLoader loader = null;
+ 
++        final boolean khopeTrace =
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.isSlowPathCaptureEnabled();
++
++        if (chunk != null && khopeTrace) {
++            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordLoadedChunkHit();
++        }
++
+         if (this.chunkLoader instanceof ChunkRegionLoader) {
+             loader = (ChunkRegionLoader) this.chunkLoader;
++        }
++
++        boolean khopeChunkExists = false;
++        if (chunk == null && loader != null) {
++            final long khopeExistsStart = khopeTrace ? System.nanoTime() : 0L;
++            khopeChunkExists = loader.chunkExists(world, i, j);
+ 
++            if (khopeTrace) {
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordChunkExistsCheck(
++                        System.nanoTime() - khopeExistsStart);
++            }
+         }
++
+         // We can only use the queue for already generated chunks
+-        if (chunk == null && loader != null && loader.chunkExists(world, i, j)) {
++        if (chunk == null && loader != null && khopeChunkExists) {
+             if (runnable != null) {
++                if (khopeTrace) {
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordAsyncChunkQueue();
++                }
++
+                 ChunkIOExecutor.queueChunkLoad(world, loader, this, i, j, runnable);
+                 return null;
+             } else {
++                final long khopeSyncLoadStart = khopeTrace ? System.nanoTime() : 0L;
+                 chunk = ChunkIOExecutor.syncChunkLoad(world, loader, this, i, j);
++
++                if (khopeTrace) {
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordSyncChunkLoad(
++                            System.nanoTime() - khopeSyncLoadStart);
++                }
+             }
+         } else if (chunk == null) {
+             chunk = originalGetChunkAt(i, j);
+@@ -154,14 +182,35 @@ public class ChunkProviderServer implements IChunkProvider {
+         // CraftBukkit end
+ 
+         if (chunk == null) {
++            final boolean khopeTrace =
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.isSlowPathCaptureEnabled();
++            final long khopeOriginalStartNanos = khopeTrace ? System.nanoTime() : 0L;
++            long khopeDirectLoadNanos = 0L;
++            long khopeGenerationNanos = 0L;
++
+             world.timings.syncChunkLoadTimer.startTiming(); // Spigot
++
++            final long khopeDirectLoadStart = khopeTrace ? System.nanoTime() : 0L;
+             chunk = this.loadChunk(i, j);
++            if (khopeTrace) {
++                khopeDirectLoadNanos = System.nanoTime() - khopeDirectLoadStart;
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordDirectChunkLoad(
++                        khopeDirectLoadNanos);
++            }
++
+             if (chunk == null) {
+                 if (this.chunkProvider == null) {
+                     chunk = this.emptyChunk;
+                 } else {
+                     try {
++                        final long khopeGenerationStart = khopeTrace ? System.nanoTime() : 0L;
+                         chunk = this.chunkProvider.getOrCreateChunk(i, j);
++
++                        if (khopeTrace) {
++                            khopeGenerationNanos = System.nanoTime() - khopeGenerationStart;
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordChunkGeneration(
++                                    khopeGenerationNanos);
++                        }
+                     } catch (Throwable throwable) {
+                         CrashReport crashreport = CrashReport.a(throwable, "Exception generating new chunk");
+                         CrashReportSystemDetails crashreportsystemdetails = crashreport.a("Chunk to be generated");
+@@ -207,6 +256,14 @@ public class ChunkProviderServer implements IChunkProvider {
+             // CraftBukkit end
+             chunk.loadNearby(this, this, i, j);
+             world.timings.syncChunkLoadTimer.stopTiming(); // Spigot
++
++            if (khopeTrace) {
++                final long khopeOriginalTotalNanos = System.nanoTime() - khopeOriginalStartNanos;
++                final long khopeFinalizeNanos = Math.max(
++                        0L, khopeOriginalTotalNanos - khopeDirectLoadNanos - khopeGenerationNanos);
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordChunkFinalization(
++                        khopeFinalizeNanos);
++            }
+         }
+ 
+         return chunk;
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 5e991d6a6..05406d201 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -919,10 +919,15 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+             }
+ 
+             final long khopeJobStartNanos = khopeJobs ? System.nanoTime() : 0L;
++            if (khopeJobs) {
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.beginJobTrace();
++            }
++
+             SystemUtils.a(entry, MinecraftServer.LOGGER);
+ 
+             if (khopeJobs) {
+                 final long khopeJobNanos = System.nanoTime() - khopeJobStartNanos;
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endJobTrace(khopeJobNanos);
+                 ++khopeJobCount;
+                 khopeJobWorkNanos += khopeJobNanos;
+                 if (khopeJobNanos > khopeJobMaxNanos) khopeJobMaxNanos = khopeJobNanos;
+diff --git a/src/main/java/net/minecraft/server/PlayerConnection.java b/src/main/java/net/minecraft/server/PlayerConnection.java
+index 86124e934..31f0b0680 100644
+--- a/src/main/java/net/minecraft/server/PlayerConnection.java
++++ b/src/main/java/net/minecraft/server/PlayerConnection.java
+@@ -1208,34 +1208,48 @@ public class PlayerConnection implements PacketListenerPlayIn, IUpdatePlayerList
+ 
+    private void handleCommand(String s) {
+         SpigotTimings.playerCommandTimer.startTiming(); // Spigot
+-       // CraftBukkit start - whole method
+-        if ( org.spigotmc.SpigotConfig.logCommands ) // Spigot
+-        this.c.info(this.player.getName() + " issued server command: " + s);
+ 
+-        CraftPlayer player = this.getPlayer();
++        // KHopeSpigot start - 0149 temporary slow-command attribution
++        final boolean khopeTraceCommand =
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.isSlowPathCaptureEnabled();
++        final long khopeCommandStartNanos = khopeTraceCommand ? System.nanoTime() : 0L;
++        // KHopeSpigot end
+ 
+-        PlayerCommandPreprocessEvent event = new PlayerCommandPreprocessEvent(player, s, new LazyPlayerSet());
+-        this.server.getPluginManager().callEvent(event);
++        try {
++           // CraftBukkit start - whole method
++            if ( org.spigotmc.SpigotConfig.logCommands ) // Spigot
++            this.c.info(this.player.getName() + " issued server command: " + s);
+ 
+-        if (event.isCancelled()) {
+-            SpigotTimings.playerCommandTimer.stopTiming(); // Spigot
+-            return;
+-        }
++            CraftPlayer player = this.getPlayer();
+ 
+-        try {
+-            if (this.server.dispatchCommand(event.getPlayer(), event.getMessage().substring(1))) {
++            PlayerCommandPreprocessEvent event = new PlayerCommandPreprocessEvent(player, s, new LazyPlayerSet());
++            this.server.getPluginManager().callEvent(event);
++
++            if (event.isCancelled()) {
++                SpigotTimings.playerCommandTimer.stopTiming(); // Spigot
++                return;
++            }
++
++            try {
++                if (this.server.dispatchCommand(event.getPlayer(), event.getMessage().substring(1))) {
++                    SpigotTimings.playerCommandTimer.stopTiming(); // Spigot
++                    return;
++                }
++            } catch (org.bukkit.command.CommandException ex) {
++                player.sendMessage(org.bukkit.ChatColor.RED + "An internal error occurred while attempting to perform this command");
++                java.util.logging.Logger.getLogger(PlayerConnection.class.getName()).log(java.util.logging.Level.SEVERE, null, ex);
+                 SpigotTimings.playerCommandTimer.stopTiming(); // Spigot
+                 return;
+             }
+-        } catch (org.bukkit.command.CommandException ex) {
+-            player.sendMessage(org.bukkit.ChatColor.RED + "An internal error occurred while attempting to perform this command");
+-            java.util.logging.Logger.getLogger(PlayerConnection.class.getName()).log(java.util.logging.Level.SEVERE, null, ex);
+             SpigotTimings.playerCommandTimer.stopTiming(); // Spigot
+-            return;
++            // this.minecraftServer.getCommandHandler().a(this.player, s);
++            // CraftBukkit end
++        } finally {
++            if (khopeTraceCommand) {
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordPlayerCommand(
++                        s, System.nanoTime() - khopeCommandStartNanos);
++            }
+         }
+-        SpigotTimings.playerCommandTimer.stopTiming(); // Spigot
+-        // this.minecraftServer.getCommandHandler().a(this.player, s);
+-        // CraftBukkit end
+     }
+ 
+     public void a(PacketPlayInArmAnimation packetplayinarmanimation) {
+-- 
+2.51.0.windows.1
+
