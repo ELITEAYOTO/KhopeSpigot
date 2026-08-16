@@ -1,0 +1,450 @@
+From a1b53d35e0738f59cd53b58159506a77ced3eb2c Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Sun, 16 Aug 2026 15:27:16 +0200
+Subject: [PATCH] KHopeSpigot: add performance subsystem attribution
+
+---
+ .../util/KhopePerformanceDiagnostics.java     | 198 +++++++++++++++++-
+ .../net/minecraft/server/MinecraftServer.java |  45 ++++
+ 2 files changed, 237 insertions(+), 6 deletions(-)
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+index ce857f405..d919ce427 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
++++ b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+@@ -12,18 +12,60 @@ import org.bukkit.command.CommandSender;
+ /**
+  * Low-overhead diagnostics for the KHopeSpigot server tick loop.
+  *
+- * The hot path uses only primitive counters and two preallocated long arrays.
+- * Sorting/allocation for percentiles happens only when /khope perf is requested.
++ * F0.1 measures active MSPT versus intentional tick pacing.
++ * F0.2 attributes active time to major main-thread subsystems and snapshots
++ * the worst active tick. Hot-path state is primitive and preallocated.
++ * Sorting and report allocations happen only when /khope perf is requested.
+  *
+- * All methods are expected to be called from the primary server thread.
++ * All recording methods are expected to run on the primary server thread.
+  */
+ public final class KhopePerformanceDiagnostics {
+ 
+     private static final int SAMPLE_CAPACITY = 8192;
+ 
++    public static final int SECTION_JOBS = 0;
++    public static final int SECTION_BUKKIT_SCHEDULER = 1;
++    public static final int SECTION_PROCESS_QUEUE = 2;
++    public static final int SECTION_CHUNK_IO = 3;
++    public static final int SECTION_TIME_UPDATE = 4;
++    public static final int SECTION_WORLD_TICK = 5;
++    public static final int SECTION_WORLD_ENTITIES = 6;
++    public static final int SECTION_WORLD_TRACKER = 7;
++    public static final int SECTION_NETWORK = 8;
++    public static final int SECTION_PLAYERS = 9;
++    public static final int SECTION_TICKABLES = 10;
++    public static final int SECTION_AUTOSAVE = 11;
++    public static final int SECTION_TICK_EVENTS = 12;
++    public static final int SECTION_OTHER = 13;
++    private static final int SECTION_COUNT = 14;
++    private static final int ACCOUNTED_SECTION_COUNT = SECTION_OTHER;
++
++    private static final String[] SECTION_NAMES = {
++            "Jobs",
++            "BukkitScheduler",
++            "ProcessQueue",
++            "ChunkIO",
++            "TimeUpdate",
++            "WorldTick",
++            "WorldEntities",
++            "WorldTracker",
++            "Network",
++            "Players",
++            "Tickables",
++            "Autosave",
++            "TickEvents",
++            "Other"
++    };
++
+     private static final long[] TICK_NANOS = new long[SAMPLE_CAPACITY];
+     private static final long[] WAIT_NANOS = new long[SAMPLE_CAPACITY];
+ 
++    private static final long[][] SECTION_NANOS = new long[SECTION_COUNT][SAMPLE_CAPACITY];
++    private static final long[] CURRENT_SECTION_NANOS = new long[SECTION_COUNT];
++    private static final long[] SECTION_TOTAL_NANOS = new long[SECTION_COUNT];
++    private static final long[] SECTION_MAX_NANOS = new long[SECTION_COUNT];
++    private static final long[] WORST_SECTION_NANOS = new long[SECTION_COUNT];
++
+     private static long windowStartNanos = System.nanoTime();
+ 
+     private static long tickCount;
+@@ -42,13 +84,50 @@ public final class KhopePerformanceDiagnostics {
+     private static int waitSampleIndex;
+     private static int waitSampleCount;
+ 
++    private static long worstTickNanos;
++    private static long worstTickNumber;
++
++    // /khope perf sorts arrays and sends chat messages. Excluding that command's
++    // own tick prevents the diagnostics from manufacturing a fake spike.
++    private static boolean skipCurrentTick;
++    private static boolean skipCurrentWait;
++
+     private static long gcCollectionsBaseline = readGcCollections();
+     private static long gcTimeMillisBaseline = readGcTimeMillis();
+ 
+     private KhopePerformanceDiagnostics() {
+     }
+ 
++    public static void beginTickBreakdown() {
++        for (int i = 0; i < SECTION_COUNT; ++i) {
++            CURRENT_SECTION_NANOS[i] = 0L;
++        }
++    }
++
++    public static void recordSection(int section, long nanos) {
++        if (section < 0 || section >= ACCOUNTED_SECTION_COUNT || nanos <= 0L) {
++            return;
++        }
++        CURRENT_SECTION_NANOS[section] += nanos;
++    }
++
++    /**
++     * Records one sequential section and returns a single shared nanoTime
++     * boundary that becomes the start of the next section.
++     */
++    public static long endSection(int section, long startNanos) {
++        final long now = System.nanoTime();
++        recordSection(section, now - startNanos);
++        return now;
++    }
++
+     public static void recordTick(long nanos) {
++        if (skipCurrentTick) {
++            skipCurrentTick = false;
++            skipCurrentWait = true;
++            return;
++        }
++
+         if (nanos < 0L) {
+             return;
+         }
+@@ -69,7 +148,10 @@ public final class KhopePerformanceDiagnostics {
+             ++tickOver50Ms;
+         }
+ 
+-        TICK_NANOS[tickSampleIndex] = nanos;
++        final int sampleIndex = tickSampleIndex;
++        TICK_NANOS[sampleIndex] = nanos;
++        finalizeBreakdown(nanos, sampleIndex);
++
+         if (++tickSampleIndex == SAMPLE_CAPACITY) {
+             tickSampleIndex = 0;
+         }
+@@ -79,6 +161,11 @@ public final class KhopePerformanceDiagnostics {
+     }
+ 
+     public static void recordWait(long nanos, int parks) {
++        if (skipCurrentWait) {
++            skipCurrentWait = false;
++            return;
++        }
++
+         if (nanos < 0L) {
+             return;
+         }
+@@ -106,6 +193,14 @@ public final class KhopePerformanceDiagnostics {
+         Arrays.fill(TICK_NANOS, 0L);
+         Arrays.fill(WAIT_NANOS, 0L);
+ 
++        for (int section = 0; section < SECTION_COUNT; ++section) {
++            Arrays.fill(SECTION_NANOS[section], 0L);
++            CURRENT_SECTION_NANOS[section] = 0L;
++            SECTION_TOTAL_NANOS[section] = 0L;
++            SECTION_MAX_NANOS[section] = 0L;
++            WORST_SECTION_NANOS[section] = 0L;
++        }
++
+         tickCount = 0L;
+         tickTotalNanos = 0L;
+         tickMaxNanos = 0L;
+@@ -122,12 +217,22 @@ public final class KhopePerformanceDiagnostics {
+         waitSampleIndex = 0;
+         waitSampleCount = 0;
+ 
++        worstTickNanos = 0L;
++        worstTickNumber = 0L;
++
++        // The reset command runs inside a server tick. Do not count that tick.
++        skipCurrentTick = true;
++        skipCurrentWait = false;
++
+         windowStartNanos = System.nanoTime();
+         gcCollectionsBaseline = readGcCollections();
+         gcTimeMillisBaseline = readGcTimeMillis();
+     }
+ 
+     public static void sendReport(CommandSender sender) {
++        // Exclude the report command's own sorting/chat work from active MSPT.
++        skipCurrentTick = true;
++
+         final long now = System.nanoTime();
+         final long elapsedNanos = Math.max(0L, now - windowStartNanos);
+ 
+@@ -141,7 +246,7 @@ public final class KhopePerformanceDiagnostics {
+         final long gcTimeMillisDelta =
+                 nonNegativeDelta(readGcTimeMillis(), gcTimeMillisBaseline);
+ 
+-        sender.sendMessage(ChatColor.GOLD + "========== KHope Performance ==========");
++        sender.sendMessage(ChatColor.GOLD + "========== KHope Performance F0.2 ==========");
+         sender.sendMessage(ChatColor.GRAY + "Fenetre: " + ChatColor.YELLOW + formatDuration(elapsedNanos)
+                 + ChatColor.GRAY + " | ticks: " + ChatColor.YELLOW + tickCount
+                 + ChatColor.GRAY + " | samples: " + ChatColor.YELLOW + tickSampleCount);
+@@ -178,8 +283,89 @@ public final class KhopePerformanceDiagnostics {
+                 + ChatColor.YELLOW + gcCollectionsDelta
+                 + ChatColor.GRAY + " | pause=" + ChatColor.YELLOW + gcTimeMillisDelta + "ms");
+ 
++        if (tickCount > 0L) {
++            sender.sendMessage(ChatColor.GOLD + "--- Sous-systemes: avg / p95 / p99 / max ---");
++            for (int section = 0; section < SECTION_COUNT; ++section) {
++                sendSectionLine(sender, section);
++            }
++
++            sender.sendMessage(ChatColor.GOLD + "--- Pire tick #" + worstTickNumber
++                    + ": " + formatMs(worstTickNanos) + " ---");
++            sendWorstSections(sender, 6);
++        }
++
++        sender.sendMessage(ChatColor.DARK_GRAY
++                + "Other = travail actif non attribue + overhead de mesure.");
+         sender.sendMessage(ChatColor.DARK_GRAY
+-                + "MSPT actif = travail du thread serveur avant l'attente du tick suivant.");
++                + "Le tick de /khope perf est exclu des statistiques.");
++    }
++
++    private static void finalizeBreakdown(long activeNanos, int sampleIndex) {
++        long accountedNanos = 0L;
++
++        for (int section = 0; section < ACCOUNTED_SECTION_COUNT; ++section) {
++            accountedNanos += CURRENT_SECTION_NANOS[section];
++        }
++
++        CURRENT_SECTION_NANOS[SECTION_OTHER] =
++                activeNanos > accountedNanos ? activeNanos - accountedNanos : 0L;
++
++        for (int section = 0; section < SECTION_COUNT; ++section) {
++            final long value = CURRENT_SECTION_NANOS[section];
++            SECTION_NANOS[section][sampleIndex] = value;
++            SECTION_TOTAL_NANOS[section] += value;
++            if (value > SECTION_MAX_NANOS[section]) {
++                SECTION_MAX_NANOS[section] = value;
++            }
++        }
++
++        if (activeNanos > worstTickNanos) {
++            worstTickNanos = activeNanos;
++            worstTickNumber = tickCount;
++            System.arraycopy(CURRENT_SECTION_NANOS, 0,
++                    WORST_SECTION_NANOS, 0, SECTION_COUNT);
++        }
++    }
++
++    private static void sendSectionLine(CommandSender sender, int section) {
++        final long[] samples = snapshot(
++                SECTION_NANOS[section], tickSampleIndex, tickSampleCount);
++        Arrays.sort(samples);
++
++        final long average = tickCount == 0L
++                ? 0L
++                : SECTION_TOTAL_NANOS[section] / tickCount;
++
++        sender.sendMessage(ChatColor.GRAY + SECTION_NAMES[section]
++                + " avg " + ChatColor.GREEN + formatMs(average)
++                + ChatColor.GRAY + " | p95 " + ChatColor.YELLOW + formatMs(percentile(samples, 95))
++                + ChatColor.GRAY + " | p99 " + ChatColor.YELLOW + formatMs(percentile(samples, 99))
++                + ChatColor.GRAY + " | max " + ChatColor.RED + formatMs(SECTION_MAX_NANOS[section]));
++    }
++
++    private static void sendWorstSections(CommandSender sender, int limit) {
++        final boolean[] used = new boolean[SECTION_COUNT];
++
++        for (int rank = 1; rank <= limit; ++rank) {
++            int bestSection = -1;
++            long bestNanos = -1L;
++
++            for (int section = 0; section < SECTION_COUNT; ++section) {
++                if (!used[section] && WORST_SECTION_NANOS[section] > bestNanos) {
++                    bestSection = section;
++                    bestNanos = WORST_SECTION_NANOS[section];
++                }
++            }
++
++            if (bestSection < 0 || bestNanos <= 0L) {
++                return;
++            }
++
++            used[bestSection] = true;
++            sender.sendMessage(ChatColor.GRAY + "#" + rank + " "
++                    + SECTION_NAMES[bestSection] + ": "
++                    + ChatColor.YELLOW + formatMs(bestNanos));
++        }
+     }
+ 
+     private static long[] snapshot(long[] source, int nextIndex, int count) {
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index 113f7a144..87ed35bd1 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -759,9 +759,13 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+     protected void z() {}
+ 
+     protected void A() throws ExceptionWorldConflict { // CraftBukkit - added throws
++        com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.beginTickBreakdown();
+         co.aikar.timings.TimingsManager.FULL_SERVER_TICK.startTiming(); // Spigot
+         long i = System.nanoTime();
+         new com.destroystokyo.paper.event.server.ServerTickStartEvent(this.ticks + 1).callEvent(); // PandaSpigot - Add ServerTickStartEvent
++        com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordSection(
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_TICK_EVENTS,
++                System.nanoTime() - i);
+ 
+         ++this.ticks;
+         if (this.T) {
+@@ -787,6 +791,7 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         }
+ 
+         if (autosavePeriod > 0 && this.ticks % autosavePeriod == 0) { // CraftBukkit
++            final long khopeAutosaveStartNanos = System.nanoTime();
+             SpigotTimings.worldSaveTimer.startTiming(); // Spigot
+             this.methodProfiler.a("save");
+             this.v.savePlayers();
+@@ -803,6 +808,9 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+             // Spigot End
+             this.methodProfiler.b();
+             SpigotTimings.worldSaveTimer.stopTiming(); // Spigot
++            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordSection(
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_AUTOSAVE,
++                    System.nanoTime() - khopeAutosaveStartNanos);
+         }
+ 
+         this.methodProfiler.a("tallying");
+@@ -824,11 +832,15 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         long endTime = System.nanoTime();
+         long remaining = (TICK_TIME - (endTime - lastTick));
+         new com.destroystokyo.paper.event.server.ServerTickEndEvent(this.ticks, ((double)(endTime - lastTick) / 1000000D), remaining).callEvent();
++        com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordSection(
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_TICK_EVENTS,
++                System.nanoTime() - endTime);
+         // PandaSpigot end
+         co.aikar.timings.TimingsManager.FULL_SERVER_TICK.stopTiming(); // Spigot
+     }
+ 
+     public void B() {
++        long khopeSectionStartNanos = System.nanoTime();
+         SpigotTimings.minecraftSchedulerTimer.startTiming(); // Spigot
+         this.methodProfiler.a("jobs");
+         Queue queue = this.j;
+@@ -843,6 +855,9 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+          }
+         // Spigot end
+         SpigotTimings.minecraftSchedulerTimer.stopTiming(); // Spigot
++        khopeSectionStartNanos = com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endSection(
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_JOBS,
++                khopeSectionStartNanos);
+ 
+         this.methodProfiler.c("levels");
+ 
+@@ -850,6 +865,9 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         // CraftBukkit start
+         this.server.getScheduler().mainThreadHeartbeat(this.ticks);
+         SpigotTimings.bukkitSchedulerTimer.stopTiming(); // Spigot
++        khopeSectionStartNanos = com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endSection(
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_BUKKIT_SCHEDULER,
++                khopeSectionStartNanos);
+ 
+         // Run tasks that are waiting on processing
+         SpigotTimings.processQueueTimer.startTiming(); // Spigot
+@@ -857,10 +875,16 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+             processQueue.remove().run();
+         }
+         SpigotTimings.processQueueTimer.stopTiming(); // Spigot
++        khopeSectionStartNanos = com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endSection(
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_PROCESS_QUEUE,
++                khopeSectionStartNanos);
+ 
+         SpigotTimings.chunkIOTickTimer.startTiming(); // Spigot
+         org.bukkit.craftbukkit.chunkio.ChunkIOExecutor.tick();
+         SpigotTimings.chunkIOTickTimer.stopTiming(); // Spigot
++        khopeSectionStartNanos = com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endSection(
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_CHUNK_IO,
++                khopeSectionStartNanos);
+ 
+         SpigotTimings.timeUpdateTimer.startTiming(); // Spigot
+         // Send time updates to everyone, it will get the right time from the world the player is in.
+@@ -883,6 +907,9 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         }
+         // PandaSpigot end
+         SpigotTimings.timeUpdateTimer.stopTiming(); // Spigot
++        khopeSectionStartNanos = com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endSection(
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_TIME_UPDATE,
++                khopeSectionStartNanos);
+ 
+         int i;
+ 
+@@ -911,6 +938,9 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                     worldserver.timings.doTick.startTiming(); // Spigot
+                     worldserver.doTick();
+                     worldserver.timings.doTick.stopTiming(); // Spigot
++                    khopeSectionStartNanos = com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endSection(
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_WORLD_TICK,
++                            khopeSectionStartNanos);
+                 } catch (Throwable throwable) {
+                     // Spigot Start
+                     try {
+@@ -927,6 +957,9 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                     worldserver.timings.tickEntities.startTiming(); // Spigot
+                     worldserver.tickEntities();
+                     worldserver.timings.tickEntities.stopTiming(); // Spigot
++                    khopeSectionStartNanos = com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endSection(
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_WORLD_ENTITIES,
++                            khopeSectionStartNanos);
+                 } catch (Throwable throwable1) {
+                     // Spigot Start
+                     try {
+@@ -968,6 +1001,9 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+                 this.methodProfiler.b();
+                 this.methodProfiler.b();
+                 worldserver.explosionDensityCache.clear(); // PaperSpigot - Optimize explosions
++                khopeSectionStartNanos = com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endSection(
++                        com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_WORLD_TRACKER,
++                        khopeSectionStartNanos);
+             // } // CraftBukkit
+ 
+             // this.i[i][this.ticks % 100] = System.nanoTime() - j; // CraftBukkit
+@@ -977,10 +1013,16 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+         SpigotTimings.connectionTimer.startTiming(); // Spigot
+         this.aq().c();
+         SpigotTimings.connectionTimer.stopTiming(); // Spigot
++        khopeSectionStartNanos = com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endSection(
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_NETWORK,
++                khopeSectionStartNanos);
+         this.methodProfiler.c("players");
+         SpigotTimings.playerListTimer.startTiming(); // Spigot
+         this.v.tick();
+         SpigotTimings.playerListTimer.stopTiming(); // Spigot
++        khopeSectionStartNanos = com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endSection(
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_PLAYERS,
++                khopeSectionStartNanos);
+         this.methodProfiler.c("tickables");
+ 
+         SpigotTimings.tickablesTimer.startTiming(); // Spigot
+@@ -988,6 +1030,9 @@ public abstract class MinecraftServer implements Runnable, ICommandListener, IAs
+             ((IUpdatePlayerListBox) this.p.get(i)).c();
+         }
+         SpigotTimings.tickablesTimer.stopTiming(); // Spigot
++        com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endSection(
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.SECTION_TICKABLES,
++                khopeSectionStartNanos);
+ 
+         this.methodProfiler.b();
+     }
+-- 
+2.51.0.windows.1
+
