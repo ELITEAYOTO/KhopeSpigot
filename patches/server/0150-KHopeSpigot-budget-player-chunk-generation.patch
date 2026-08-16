@@ -1,0 +1,385 @@
+From d45f97a805f9067e586115b4f94acb5d6f38afb2 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Sun, 16 Aug 2026 22:31:08 +0200
+Subject: [PATCH] KHopeSpigot: budget player chunk generation
+
+---
+ .../config/PandaSpigotWorldConfig.java        |  16 ++
+ .../util/KhopePerformanceDiagnostics.java     |  57 ++++++
+ .../minecraft/server/ChunkProviderServer.java | 187 ++++++++++++++++++
+ .../net/minecraft/server/PlayerChunkMap.java  |   8 +
+ 4 files changed, 268 insertions(+)
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+index 8e640973d..24b1be582 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotWorldConfig.java
+@@ -53,6 +53,22 @@ public class PandaSpigotWorldConfig {
+         public double extraVertical = 0.1;
+     }
+ 
++    @Comment("Budget generation of brand-new chunks requested through the asynchronous player-chunk path.\n" +
++            "\n" +
++            "Existing chunks on disk still use the normal async ChunkIO path. Brand-new terrain must remain\n" +
++            "on the main thread for 1.8.8 generator/plugin compatibility, so KHopeSpigot spreads that work\n" +
++            "across ticks instead of generating an entire view-distance burst in one tick.")
++    public boolean budgetPlayerChunkGeneration = true;
++
++    @Comment("Maximum number of brand-new chunks generated per world tick by the budgeted player-chunk queue.\n" +
++            "Set to 0 or less to disable only the count cap. The time budget can still stop the queue.")
++    public int playerChunkGenerationMaxPerTick = 4;
++
++    @Comment("Maximum target time, in milliseconds, spent on the budgeted player-chunk generation queue per world tick.\n" +
++            "A single chunk generation cannot be preempted, so an unusually slow generator may exceed this target.\n" +
++            "Set to 0 or less to disable only the time cap.")
++    public double playerChunkGenerationBudgetMs = 8.0D;
++
+     public boolean optimizeTntMovement = false; // May not fully emulate vanilla behavior
+ 
+     public boolean optimizeLiquidExplosions = true; // This seems like a pretty sane default
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+index 7e00b5179..aff4682ca 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
++++ b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+@@ -158,6 +158,15 @@ public final class KhopePerformanceDiagnostics {
+     private static long chunkFinalizeTotalNanos;
+     private static long chunkFinalizeMaxNanos;
+ 
++    // 0150 - budgeted player chunk generation queue.
++    private static long deferredGenerationTicks;
++    private static long deferredGeneratedChunks;
++    private static long deferredGenerationWorkNanos;
++    private static long deferredGenerationMaxTickNanos;
++    private static long deferredGenerationBudgetHits;
++    private static int deferredGenerationMaxPending;
++    private static long deferredGenerationMaxOldestAgeNanos;
++
+     // Current FutureTask context. Main-thread only while jobs tracing is active.
+     private static boolean jobTraceActive;
+     private static String currentJobCommand = "-";
+@@ -374,6 +383,34 @@ public final class KhopePerformanceDiagnostics {
+         }
+     }
+ 
++    public static void recordDeferredChunkGenerationBudget(
++            int generated,
++            int pending,
++            long workNanos,
++            boolean budgetHit,
++            long oldestAgeNanos) {
++        if (!isSlowPathCaptureEnabled()) {
++            return;
++        }
++
++        ++deferredGenerationTicks;
++        deferredGeneratedChunks += generated;
++        deferredGenerationWorkNanos += Math.max(0L, workNanos);
++
++        if (workNanos > deferredGenerationMaxTickNanos) {
++            deferredGenerationMaxTickNanos = workNanos;
++        }
++        if (budgetHit) {
++            ++deferredGenerationBudgetHits;
++        }
++        if (pending > deferredGenerationMaxPending) {
++            deferredGenerationMaxPending = pending;
++        }
++        if (oldestAgeNanos > deferredGenerationMaxOldestAgeNanos) {
++            deferredGenerationMaxOldestAgeNanos = oldestAgeNanos;
++        }
++    }
++
+     public static void recordSection(int section, long nanos) {
+         if (!detailThisTick
+                 || section < 0
+@@ -672,6 +709,18 @@ public final class KhopePerformanceDiagnostics {
+                         + ChatColor.GRAY + " max " + ChatColor.RED + formatMs(chunkFinalizeMaxNanos));
+             }
+ 
++            if (deferredGenerationTicks > 0L) {
++                sender.sendMessage(ChatColor.GOLD + "--- Budgeted player chunk generation 0150 ---");
++                sender.sendMessage(ChatColor.GRAY + "Generated: " + ChatColor.YELLOW + deferredGeneratedChunks
++                        + ChatColor.GRAY + " | ticks active: " + ChatColor.YELLOW + deferredGenerationTicks
++                        + ChatColor.GRAY + " | budget hits: " + ChatColor.RED + deferredGenerationBudgetHits);
++                sender.sendMessage(ChatColor.GRAY + "Work: " + ChatColor.YELLOW + formatMs(deferredGenerationWorkNanos)
++                        + ChatColor.GRAY + " | max/tick " + ChatColor.RED + formatMs(deferredGenerationMaxTickNanos)
++                        + ChatColor.GRAY + " | max pending " + ChatColor.YELLOW + deferredGenerationMaxPending
++                        + ChatColor.GRAY + " | oldest max " + ChatColor.YELLOW
++                        + formatMs(deferredGenerationMaxOldestAgeNanos));
++            }
++
+             if (worstTracedJobNanos > 0L) {
+                 sender.sendMessage(ChatColor.GOLD + "--- Worst FutureTask attribution ---");
+                 sender.sendMessage(ChatColor.GRAY + "Task: " + ChatColor.RED + formatMs(worstTracedJobNanos)
+@@ -852,6 +901,14 @@ public final class KhopePerformanceDiagnostics {
+         chunkFinalizeTotalNanos = 0L;
+         chunkFinalizeMaxNanos = 0L;
+ 
++        deferredGenerationTicks = 0L;
++        deferredGeneratedChunks = 0L;
++        deferredGenerationWorkNanos = 0L;
++        deferredGenerationMaxTickNanos = 0L;
++        deferredGenerationBudgetHits = 0L;
++        deferredGenerationMaxPending = 0;
++        deferredGenerationMaxOldestAgeNanos = 0L;
++
+         jobTraceActive = false;
+         currentJobCommand = "-";
+         currentJobCommandNanos = 0L;
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index a2811e076..f1820e277 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -2,10 +2,14 @@ package net.minecraft.server;
+ 
+ import com.google.common.collect.Lists;
+ import java.io.IOException;
++import java.util.ArrayDeque;
+ import java.util.ArrayList;
+ import java.util.Collections;
++import java.util.HashMap;
+ import java.util.Iterator;
+ import java.util.List;
++import java.util.Map;
++import java.util.Queue;
+ import java.util.Set;
+ import java.util.concurrent.ConcurrentHashMap;
+ import org.apache.logging.log4j.LogManager;
+@@ -37,6 +41,38 @@ public class ChunkProviderServer implements IChunkProvider {
+     public LongObjectHashMap<Chunk> chunks = new LongObjectHashMap<Chunk>();
+     public WorldServer world;
+ 
++    // KHopeSpigot start - 0150 budgeted player chunk generation
++    //
++    // getChunkAt(x, z, Runnable) is the async-compatible path used by
++    // PlayerChunkMap. Existing chunks can be read through ChunkIOExecutor, but
++    // previously brand-new chunks fell through to originalGetChunkAt() and
++    // generated synchronously in the caller's tick. A teleport at view-distance
++    // 12 can therefore request roughly 625 chunks at once.
++    //
++    // Keep generation on the primary thread for 1.8.8 generator/populator
++    // compatibility, but defer and deduplicate new terrain requests so only a
++    // bounded amount is generated each world tick.
++    private final Queue<KhopePendingChunkGeneration> khopePendingChunkGenerations =
++            new ArrayDeque<KhopePendingChunkGeneration>();
++    private final Map<Long, KhopePendingChunkGeneration> khopePendingChunkGenerationByKey =
++            new HashMap<Long, KhopePendingChunkGeneration>();
++
++    private static final class KhopePendingChunkGeneration {
++        private final long key;
++        private final int x;
++        private final int z;
++        private final long queuedNanos = System.nanoTime();
++        private final List<Runnable> callbacks = new ArrayList<Runnable>(2);
++        private boolean cancelled;
++
++        private KhopePendingChunkGeneration(long key, int x, int z) {
++            this.key = key;
++            this.x = x;
++            this.z = z;
++        }
++    }
++    // KHopeSpigot end
++
+     public ChunkProviderServer(WorldServer worldserver, IChunkLoader ichunkloader, IChunkProvider ichunkprovider) {
+         this.emptyChunk = new EmptyChunk(worldserver, Integer.MIN_VALUE, Integer.MIN_VALUE); // PandaSpigot - Occasional Client Side Unloading of 0,0 chunk
+         this.world = worldserver;
+@@ -164,6 +200,15 @@ public class ChunkProviderServer implements IChunkProvider {
+                 }
+             }
+         } else if (chunk == null) {
++            // KHopeSpigot start - 0150 budget new terrain requested by PlayerChunkMap
++            if (runnable != null
++                    && this.world.pandaSpigotConfig.budgetPlayerChunkGeneration
++                    && MinecraftServer.getServer().isMainThread()) {
++                this.queueKhopeChunkGeneration(i, j, runnable);
++                return null;
++            }
++            // KHopeSpigot end
++
+             chunk = originalGetChunkAt(i, j);
+         }
+ 
+@@ -174,6 +219,148 @@ public class ChunkProviderServer implements IChunkProvider {
+ 
+         return chunk;
+     }
++
++    // KHopeSpigot start - 0150 budgeted player chunk generation
++    private void queueKhopeChunkGeneration(int x, int z, Runnable callback) {
++        final long key = LongHash.toLong(x, z);
++
++        if (this.chunks.get(key) != null) {
++            callback.run();
++            return;
++        }
++
++        final Long boxedKey = Long.valueOf(key);
++        KhopePendingChunkGeneration pending = this.khopePendingChunkGenerationByKey.get(boxedKey);
++        if (pending == null) {
++            pending = new KhopePendingChunkGeneration(key, x, z);
++            this.khopePendingChunkGenerationByKey.put(boxedKey, pending);
++            this.khopePendingChunkGenerations.add(pending);
++        }
++
++        if (!pending.callbacks.contains(callback)) {
++            pending.callbacks.add(callback);
++        }
++    }
++
++    public void dropKhopeQueuedChunkGeneration(int x, int z, Runnable callback) {
++        if (callback == null) {
++            return;
++        }
++
++        final Long key = Long.valueOf(LongHash.toLong(x, z));
++        final KhopePendingChunkGeneration pending = this.khopePendingChunkGenerationByKey.get(key);
++        if (pending == null) {
++            return;
++        }
++
++        pending.callbacks.remove(callback);
++        if (pending.callbacks.isEmpty()) {
++            this.khopePendingChunkGenerationByKey.remove(key);
++            pending.cancelled = true;
++        }
++    }
++
++    public void processKhopeDeferredChunkGenerations() {
++        if (this.khopePendingChunkGenerations.isEmpty()) {
++            return;
++        }
++
++        final com.hpfxd.pandaspigot.config.PandaSpigotWorldConfig config =
++                this.world.pandaSpigotConfig;
++        final boolean budgeting = config.budgetPlayerChunkGeneration;
++
++        // If the option is disabled/reloaded while requests are already
++        // pending, finish those existing requests without a budget instead of
++        // leaving PlayerChunk callbacks stranded forever.
++        final int maxPerTick = budgeting ? config.playerChunkGenerationMaxPerTick : 0;
++        final long budgetNanos = !budgeting || config.playerChunkGenerationBudgetMs <= 0.0D
++                ? Long.MAX_VALUE
++                : (long) (config.playerChunkGenerationBudgetMs * 1_000_000.0D);
++
++        final long startNanos = System.nanoTime();
++        int generated = 0;
++        boolean budgetHit = false;
++
++        while (true) {
++            KhopePendingChunkGeneration pending = this.khopePendingChunkGenerations.peek();
++
++            // Discard stale/cancelled queue nodes in O(1) from the head.
++            while (pending != null
++                    && (pending.cancelled
++                    || this.khopePendingChunkGenerationByKey.get(Long.valueOf(pending.key)) != pending)) {
++                this.khopePendingChunkGenerations.poll();
++                pending = this.khopePendingChunkGenerations.peek();
++            }
++
++            if (pending == null) {
++                break;
++            }
++
++            if (maxPerTick > 0 && generated >= maxPerTick) {
++                budgetHit = true;
++                break;
++            }
++
++            // Always allow at least one generation so an extremely small time
++            // budget cannot deadlock the queue.
++            if (generated > 0
++                    && budgetNanos != Long.MAX_VALUE
++                    && System.nanoTime() - startNanos >= budgetNanos) {
++                budgetHit = true;
++                break;
++            }
++
++            this.khopePendingChunkGenerations.poll();
++            this.khopePendingChunkGenerationByKey.remove(Long.valueOf(pending.key));
++
++            // Another path may have loaded/generated the chunk while this
++            // request was waiting. In that case only complete the callbacks.
++            if (this.chunks.get(pending.key) == null) {
++                this.originalGetChunkAt(pending.x, pending.z);
++                ++generated;
++            }
++
++            for (int callbackIndex = 0; callbackIndex < pending.callbacks.size(); ++callbackIndex) {
++                try {
++                    pending.callbacks.get(callbackIndex).run();
++                } catch (Throwable throwable) {
++                    ChunkProviderServer.b.error(
++                            "Exception completing deferred chunk generation callback at "
++                                    + pending.x + "," + pending.z,
++                            throwable);
++                }
++            }
++        }
++
++        final KhopePendingChunkGeneration oldest = this.peekKhopePendingChunkGeneration();
++        final long oldestAgeNanos = oldest == null
++                ? 0L
++                : Math.max(0L, System.nanoTime() - oldest.queuedNanos);
++
++        com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordDeferredChunkGenerationBudget(
++                generated,
++                this.khopePendingChunkGenerationByKey.size(),
++                System.nanoTime() - startNanos,
++                budgetHit,
++                oldestAgeNanos);
++    }
++
++    private KhopePendingChunkGeneration peekKhopePendingChunkGeneration() {
++        KhopePendingChunkGeneration pending = this.khopePendingChunkGenerations.peek();
++        while (pending != null
++                && (pending.cancelled
++                || this.khopePendingChunkGenerationByKey.get(Long.valueOf(pending.key)) != pending)) {
++            this.khopePendingChunkGenerations.poll();
++            pending = this.khopePendingChunkGenerations.peek();
++        }
++        return pending;
++    }
++
++    public int getKhopePendingChunkGenerationCount() {
++        return this.khopePendingChunkGenerationByKey.size();
++    }
++    // KHopeSpigot end
++
+     public Chunk originalGetChunkAt(int i, int j) {
+         long key = LongHash.toLong(i, j); // PandaSpigot - Only create key once
+         this.unloadQueue.remove(i, j);
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index 1c9dbe212..d0d466cc0 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -38,6 +38,10 @@ public class PlayerChunkMap {
+     }
+ 
+     public void flush() {
++        // KHopeSpigot - 0150: generate a bounded amount of brand-new player
++        // terrain before processing the normal PlayerChunkMap work.
++        this.world.chunkProviderServer.processKhopeDeferredChunkGenerations();
++
+         long i = this.world.getTime();
+         int j;
+         PlayerChunkMap.PlayerChunk playerchunkmap_playerchunk;
+@@ -406,11 +410,15 @@ public class PlayerChunkMap {
+                 // CraftBukkit start - If we haven't loaded yet don't load the chunk just so we can clean it up
+                 if (!this.loaded) {
+                     ChunkIOExecutor.dropQueuedChunkLoad(PlayerChunkMap.this.a(), this.location.x, this.location.z, this.players.get(entityplayer));
++                    PlayerChunkMap.this.a().chunkProviderServer.dropKhopeQueuedChunkGeneration(
++                            this.location.x, this.location.z, this.players.get(entityplayer));
+                     this.b.remove(entityplayer);
+                     this.players.remove(entityplayer);
+ 
+                     if (this.b.isEmpty()) {
+                         ChunkIOExecutor.dropQueuedChunkLoad(PlayerChunkMap.this.a(), this.location.x, this.location.z, this.loadedRunnable);
++                        PlayerChunkMap.this.a().chunkProviderServer.dropKhopeQueuedChunkGeneration(
++                                this.location.x, this.location.z, this.loadedRunnable);
+                         long i = (long) this.location.x + 2147483647L | (long) this.location.z + 2147483647L << 32;
+                         PlayerChunkMap.this.d.remove(i);
+                         PlayerChunkMap.this.f.remove(this);
+-- 
+2.51.0.windows.1
+
