@@ -1,0 +1,82 @@
+From 1bd15b2cd2a91f0621bd4d3e499f6030aa801b00 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 17:27:10 +0200
+Subject: [PATCH] KHopeSpigot: cache pathfinder goal active membership
+
+---
+ .../minecraft/server/PathfinderGoalSelector.java   | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/PathfinderGoalSelector.java b/src/main/java/net/minecraft/server/PathfinderGoalSelector.java
+index b03ba857..c3627099 100644
+--- a/src/main/java/net/minecraft/server/PathfinderGoalSelector.java
++++ b/src/main/java/net/minecraft/server/PathfinderGoalSelector.java
+@@ -33,9 +33,10 @@ public class PathfinderGoalSelector {
+             PathfinderGoal pathfindergoal1 = pathfindergoalselector_pathfindergoalselectoritem.a;
+ 
+             if (pathfindergoal1 == pathfindergoal) {
+-                if (this.c.contains(pathfindergoalselector_pathfindergoalselectoritem)) {
++                if (pathfindergoalselector_pathfindergoalselectoritem.c) {
+                     pathfindergoal1.d();
+                     this.c.remove(pathfindergoalselector_pathfindergoalselectoritem);
++                    pathfindergoalselector_pathfindergoalselectoritem.c = false;
+                 }
+ 
+                 iterator.remove();
+@@ -54,7 +55,7 @@ public class PathfinderGoalSelector {
+ 
+             while (iterator.hasNext()) {
+                 pathfindergoalselector_pathfindergoalselectoritem = (PathfinderGoalSelector.PathfinderGoalSelectorItem) iterator.next();
+-                boolean flag = this.c.contains(pathfindergoalselector_pathfindergoalselectoritem);
++                boolean flag = pathfindergoalselector_pathfindergoalselectoritem.c; // KHopeSpigot - O(1) active-goal state
+ 
+                 if (flag) {
+                     if (this.b(pathfindergoalselector_pathfindergoalselectoritem) && this.a(pathfindergoalselector_pathfindergoalselectoritem)) {
+@@ -63,11 +64,13 @@ public class PathfinderGoalSelector {
+ 
+                     pathfindergoalselector_pathfindergoalselectoritem.a.d();
+                     this.c.remove(pathfindergoalselector_pathfindergoalselectoritem);
++                    pathfindergoalselector_pathfindergoalselectoritem.c = false;
+                 }
+ 
+                 if (this.b(pathfindergoalselector_pathfindergoalselectoritem) && pathfindergoalselector_pathfindergoalselectoritem.a.a()) {
+                     pathfindergoalselector_pathfindergoalselectoritem.a.c();
+                     this.c.add(pathfindergoalselector_pathfindergoalselectoritem);
++                    pathfindergoalselector_pathfindergoalselectoritem.c = true;
+                 }
+             }
+         } else {
+@@ -78,6 +81,7 @@ public class PathfinderGoalSelector {
+                 if (!this.a(pathfindergoalselector_pathfindergoalselectoritem)) {
+                     pathfindergoalselector_pathfindergoalselectoritem.a.d();
+                     iterator.remove();
++                    pathfindergoalselector_pathfindergoalselectoritem.c = false;
+                 }
+             }
+         }
+@@ -108,11 +112,11 @@ public class PathfinderGoalSelector {
+ 
+             if (pathfindergoalselector_pathfindergoalselectoritem1 != pathfindergoalselector_pathfindergoalselectoritem) {
+                 if (pathfindergoalselector_pathfindergoalselectoritem.b >= pathfindergoalselector_pathfindergoalselectoritem1.b) {
+-                    if (!this.a(pathfindergoalselector_pathfindergoalselectoritem, pathfindergoalselector_pathfindergoalselectoritem1) && this.c.contains(pathfindergoalselector_pathfindergoalselectoritem1)) {
++                    if (!this.a(pathfindergoalselector_pathfindergoalselectoritem, pathfindergoalselector_pathfindergoalselectoritem1) && pathfindergoalselector_pathfindergoalselectoritem1.c) {
+                         ((UnsafeList.Itr) iterator).valid = false; // CraftBukkit - mark iterator for reuse
+                         return false;
+                     }
+-                } else if (!pathfindergoalselector_pathfindergoalselectoritem1.a.i() && this.c.contains(pathfindergoalselector_pathfindergoalselectoritem1)) {
++                } else if (!pathfindergoalselector_pathfindergoalselectoritem1.a.i() && pathfindergoalselector_pathfindergoalselectoritem1.c) {
+                     ((UnsafeList.Itr) iterator).valid = false; // CraftBukkit - mark iterator for reuse
+                     return false;
+                 }
+@@ -130,6 +134,8 @@ public class PathfinderGoalSelector {
+ 
+         public PathfinderGoal a;
+         public int b;
++        // KHopeSpigot - cached membership in active-goal list
++        private boolean c;
+ 
+         public PathfinderGoalSelectorItem(int i, PathfinderGoal pathfindergoal) {
+             this.b = i;
+-- 
+2.51.0.windows.1
+
