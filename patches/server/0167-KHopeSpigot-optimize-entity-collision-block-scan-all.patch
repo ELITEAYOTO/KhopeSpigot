@@ -1,0 +1,65 @@
+From 18600dfe22c4c86e3b09122a97ef3151e8900502 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 16:17:09 +0200
+Subject: [PATCH] KHopeSpigot: optimize entity collision block scan allocations
+
+---
+ src/main/java/net/minecraft/server/World.java | 24 ++++++++++---------
+ 1 file changed, 13 insertions(+), 11 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index edc49bc97..1edb7fb90 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -1297,6 +1297,14 @@ public abstract class World implements IBlockAccess {
+         IBlockData iblockdata = Blocks.STONE.getBlockData();
+         BlockPosition.MutableBlockPosition blockposition_mutableblockposition = new BlockPosition.MutableBlockPosition();
+ 
++        // KHopeSpigot start - avoid per-block collision allocation / invariant work
++        if (flag && flag1) {
++            entity.h(false);
++        } else if (!flag && !flag1) {
++            entity.h(true);
++        }
++        // KHopeSpigot end
++
+         // Spigot start
+         int ystart = ( ( k - 1 ) < 0 ) ? 0 : ( k - 1 );
+         for ( int chunkx = ( i >> 4 ); chunkx <= ( ( j - 1 ) >> 4 ); chunkx++ )
+@@ -1329,20 +1337,14 @@ public abstract class World implements IBlockAccess {
+                     {
+                         for ( int y = ystart; y < l; y++ )
+                         {
+-                            BlockPosition blockposition = new BlockPosition( x, y, z );
+-
+-                            if (flag && flag1) {
+-                                entity.h(false);
+-                            } else if (!flag && !flag1) {
+-                                entity.h(true);
+-                            }
++                            blockposition_mutableblockposition.c(x, y, z);
+ 
+                             IBlockData block; 
+-                            if (!this.getWorldBorder().a(blockposition) && flag1) {
+-                                block = Blocks.STONE.getBlockData();
++                            if (flag1 && !worldborder.a(blockposition_mutableblockposition)) {
++                                block = iblockdata;
+                             } else 
+                             {
+-                                block = chunk.getBlockData( blockposition );
++                                block = chunk.getBlockData( blockposition_mutableblockposition );
+                             }
+                             if ( block != null )
+                             {
+@@ -1352,7 +1354,7 @@ public abstract class World implements IBlockAccess {
+                                     AxisAlignedBB aabb = AxisAlignedBB.a(x, y, z, x + 1.0, y + 1.0, z + 1.0);
+                                     if (axisalignedbb.b(aabb)) arraylist.add(aabb);
+                                 } else {
+-                                    b.a(this, blockposition, block, axisalignedbb, arraylist, entity);
++                                    b.a(this, blockposition_mutableblockposition, block, axisalignedbb, arraylist, entity);
+                                 }
+                                 // PaperSpigot end
+                             }
+-- 
+2.51.0.windows.1
+
