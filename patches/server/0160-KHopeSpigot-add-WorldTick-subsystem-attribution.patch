@@ -1,0 +1,452 @@
+From c83fa4affd4b06a8d63a1ba5b06a79ab56da9873 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 13:10:12 +0200
+Subject: [PATCH] KHopeSpigot: add WorldTick subsystem attribution
+
+---
+ .../util/KhopePerformanceDiagnostics.java     | 176 ++++++++++++++++++
+ .../net/minecraft/server/WorldServer.java     |  92 +++++++++
+ 2 files changed, 268 insertions(+)
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+index 836a73701..2a29f9035 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
++++ b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+@@ -67,6 +67,41 @@ public final class KhopePerformanceDiagnostics {
+             "Other"
+     };
+ 
++    // 0160 - second-level WorldTick attribution. These sections are only
++    // recorded during an explicit /khope perf detail/jobs capture.
++    public static final int WORLD_SECTION_WEATHER = 0;
++    public static final int WORLD_SECTION_BASE = 1;
++    public static final int WORLD_SECTION_MOB_SPAWN = 2;
++    public static final int WORLD_SECTION_CHUNK_UNLOAD = 3;
++    public static final int WORLD_SECTION_SCHEDULED_TICKS = 4;
++    public static final int WORLD_SECTION_CHUNK_TICK = 5;
++    public static final int WORLD_SECTION_ANTI_XRAY = 6;
++    public static final int WORLD_SECTION_PLAYER_CHUNKS = 7;
++    public static final int WORLD_SECTION_VILLAGES = 8;
++    public static final int WORLD_SECTION_PORTAL_FORCER = 9;
++    public static final int WORLD_SECTION_SOUNDS = 10;
++    public static final int WORLD_SECTION_CHUNK_GC = 11;
++    public static final int WORLD_SECTION_OTHER = 12;
++
++    private static final int WORLD_SECTION_COUNT = 13;
++    private static final int WORLD_ACCOUNTED_SECTION_COUNT = WORLD_SECTION_OTHER;
++
++    private static final String[] WORLD_SECTION_NAMES = {
++            "Weather",
++            "WorldBase",
++            "MobSpawn",
++            "ChunkUnload",
++            "ScheduledTicks",
++            "ChunkTick",
++            "AntiXray",
++            "PlayerChunks",
++            "Villages",
++            "PortalForcer",
++            "Sounds",
++            "ChunkGC",
++            "WorldOther"
++    };
++
+     private static final long[] TICK_NANOS = new long[SAMPLE_CAPACITY];
+     private static final long[] WAIT_NANOS = new long[SAMPLE_CAPACITY];
+ 
+@@ -103,6 +138,14 @@ public final class KhopePerformanceDiagnostics {
+     private static final long[] SECTION_MAX_NANOS = new long[SECTION_COUNT];
+     private static final long[] WORST_SECTION_NANOS = new long[SECTION_COUNT];
+ 
++    // 0160 - WorldTick second-level samples, accumulated across all worlds
++    // into the current server tick.
++    private static long[][] worldSectionNanos;
++    private static final long[] CURRENT_WORLD_SECTION_NANOS = new long[WORLD_SECTION_COUNT];
++    private static final long[] WORLD_SECTION_TOTAL_NANOS = new long[WORLD_SECTION_COUNT];
++    private static final long[] WORLD_SECTION_MAX_NANOS = new long[WORLD_SECTION_COUNT];
++    private static final long[] WORST_WORLD_SECTION_NANOS = new long[WORLD_SECTION_COUNT];
++
+     private static long detailWindowStartNanos;
+     private static long detailWindowLastNanos;
+     private static long detailTickCount;
+@@ -111,6 +154,9 @@ public final class KhopePerformanceDiagnostics {
+     private static long detailWorstTickNanos;
+     private static long detailWorstTickNumber;
+ 
++    private static long detailWorstWorldTickNanos;
++    private static long detailWorstWorldTickNumber;
++
+     private static long jobsTaskCountTotal;
+     private static long jobsWorkNanosTotal;
+     private static long jobsMaxSingleNanos;
+@@ -233,6 +279,9 @@ public final class KhopePerformanceDiagnostics {
+         for (int i = 0; i < SECTION_COUNT; ++i) {
+             CURRENT_SECTION_NANOS[i] = 0L;
+         }
++        for (int i = 0; i < WORLD_SECTION_COUNT; ++i) {
++            CURRENT_WORLD_SECTION_NANOS[i] = 0L;
++        }
+ 
+         currentJobCount = 0;
+         currentJobWorkNanos = 0L;
+@@ -484,6 +533,22 @@ public final class KhopePerformanceDiagnostics {
+         return now;
+     }
+ 
++    public static void recordWorldSection(int section, long nanos) {
++        if (!detailThisTick
++                || section < 0
++                || section >= WORLD_ACCOUNTED_SECTION_COUNT
++                || nanos <= 0L) {
++            return;
++        }
++        CURRENT_WORLD_SECTION_NANOS[section] += nanos;
++    }
++
++    public static long endWorldSection(int section, long startNanos) {
++        final long now = System.nanoTime();
++        recordWorldSection(section, now - startNanos);
++        return now;
++    }
++
+     public static void recordJobs(
+             int count,
+             long workNanos,
+@@ -706,6 +771,35 @@ public final class KhopePerformanceDiagnostics {
+                 sendSectionLine(sender, section);
+             }
+ 
++            if (worldSectionNanos != null && SECTION_TOTAL_NANOS[SECTION_WORLD_TICK] > 0L) {
++                sender.sendMessage(ChatColor.GOLD + "--- WorldTick breakdown 0160 ---");
++                for (int section = 0; section < WORLD_SECTION_COUNT; ++section) {
++                    sendWorldSectionLine(sender, section);
++                }
++
++                final long worldTickTotal = SECTION_TOTAL_NANOS[SECTION_WORLD_TICK];
++                final long worldUnaccounted = WORLD_SECTION_TOTAL_NANOS[WORLD_SECTION_OTHER];
++                final long worldAccounted = Math.max(0L, worldTickTotal - worldUnaccounted);
++                final double accountedPercent = worldTickTotal == 0L
++                        ? 0.0D
++                        : Math.min(100.0D, (double) worldAccounted * 100.0D / (double) worldTickTotal);
++
++                sender.sendMessage(ChatColor.GRAY + "WorldTick accounted: " + ChatColor.GREEN
++                        + formatMs(detailTickCount == 0L ? 0L : worldAccounted / detailTickCount)
++                        + ChatColor.GRAY + " / "
++                        + formatMs(detailTickCount == 0L ? 0L : worldTickTotal / detailTickCount)
++                        + ChatColor.GRAY + " = " + ChatColor.YELLOW + formatDouble(accountedPercent) + "%");
++                sender.sendMessage(ChatColor.GRAY + "WorldTick unaccounted: " + ChatColor.YELLOW
++                        + formatMs(detailTickCount == 0L ? 0L : worldUnaccounted / detailTickCount));
++
++                if (detailWorstWorldTickNanos > 0L) {
++                    sender.sendMessage(ChatColor.GOLD + "--- Pire WorldTick detail #"
++                            + detailWorstWorldTickNumber + ": "
++                            + formatMs(detailWorstWorldTickNanos) + " ---");
++                    sendWorstWorldSections(sender, 6);
++                }
++            }
++
+             if (jobsTicksWithWork > 0L) {
+                 sender.sendMessage(ChatColor.GOLD + "--- Jobs queue (capture temporaire) ---");
+                 sender.sendMessage(ChatColor.GRAY + "Tasks total: " + ChatColor.YELLOW + jobsTaskCountTotal
+@@ -924,6 +1018,9 @@ public final class KhopePerformanceDiagnostics {
+         if (sectionNanos == null) {
+             sectionNanos = new long[SECTION_COUNT][SAMPLE_CAPACITY];
+         }
++        if (worldSectionNanos == null) {
++            worldSectionNanos = new long[WORLD_SECTION_COUNT][SAMPLE_CAPACITY];
++        }
+     }
+ 
+     private static void clearDetailStats() {
+@@ -932,12 +1029,22 @@ public final class KhopePerformanceDiagnostics {
+                 Arrays.fill(sectionNanos[section], 0L);
+             }
+         }
++        if (worldSectionNanos != null) {
++            for (int section = 0; section < WORLD_SECTION_COUNT; ++section) {
++                Arrays.fill(worldSectionNanos[section], 0L);
++            }
++        }
+ 
+         Arrays.fill(CURRENT_SECTION_NANOS, 0L);
+         Arrays.fill(SECTION_TOTAL_NANOS, 0L);
+         Arrays.fill(SECTION_MAX_NANOS, 0L);
+         Arrays.fill(WORST_SECTION_NANOS, 0L);
+ 
++        Arrays.fill(CURRENT_WORLD_SECTION_NANOS, 0L);
++        Arrays.fill(WORLD_SECTION_TOTAL_NANOS, 0L);
++        Arrays.fill(WORLD_SECTION_MAX_NANOS, 0L);
++        Arrays.fill(WORST_WORLD_SECTION_NANOS, 0L);
++
+         detailWindowStartNanos = 0L;
+         detailWindowLastNanos = 0L;
+         detailTickCount = 0L;
+@@ -945,6 +1052,8 @@ public final class KhopePerformanceDiagnostics {
+         detailSampleCount = 0;
+         detailWorstTickNanos = 0L;
+         detailWorstTickNumber = 0L;
++        detailWorstWorldTickNanos = 0L;
++        detailWorstWorldTickNumber = 0L;
+ 
+         jobsTaskCountTotal = 0L;
+         jobsWorkNanosTotal = 0L;
+@@ -1062,6 +1171,15 @@ public final class KhopePerformanceDiagnostics {
+         CURRENT_SECTION_NANOS[SECTION_OTHER] =
+                 activeNanos > accountedNanos ? activeNanos - accountedNanos : 0L;
+ 
++        final long worldTickNanos = CURRENT_SECTION_NANOS[SECTION_WORLD_TICK];
++        long worldAccountedNanos = 0L;
++        for (int section = 0; section < WORLD_ACCOUNTED_SECTION_COUNT; ++section) {
++            worldAccountedNanos += CURRENT_WORLD_SECTION_NANOS[section];
++        }
++
++        CURRENT_WORLD_SECTION_NANOS[WORLD_SECTION_OTHER] =
++                worldTickNanos > worldAccountedNanos ? worldTickNanos - worldAccountedNanos : 0L;
++
+         final int sampleIndex = detailSampleIndex;
+         for (int section = 0; section < SECTION_COUNT; ++section) {
+             final long value = CURRENT_SECTION_NANOS[section];
+@@ -1070,6 +1188,13 @@ public final class KhopePerformanceDiagnostics {
+             if (value > SECTION_MAX_NANOS[section]) SECTION_MAX_NANOS[section] = value;
+         }
+ 
++        for (int section = 0; section < WORLD_SECTION_COUNT; ++section) {
++            final long value = CURRENT_WORLD_SECTION_NANOS[section];
++            worldSectionNanos[section][sampleIndex] = value;
++            WORLD_SECTION_TOTAL_NANOS[section] += value;
++            if (value > WORLD_SECTION_MAX_NANOS[section]) WORLD_SECTION_MAX_NANOS[section] = value;
++        }
++
+         ++detailTickCount;
+         detailWindowLastNanos = System.nanoTime();
+ 
+@@ -1082,6 +1207,17 @@ public final class KhopePerformanceDiagnostics {
+             worstTickJobMaxNanos = currentJobMaxNanos;
+         }
+ 
++        if (worldTickNanos > detailWorstWorldTickNanos) {
++            detailWorstWorldTickNanos = worldTickNanos;
++            detailWorstWorldTickNumber = detailTickCount;
++            System.arraycopy(
++                    CURRENT_WORLD_SECTION_NANOS,
++                    0,
++                    WORST_WORLD_SECTION_NANOS,
++                    0,
++                    WORLD_SECTION_COUNT);
++        }
++
+         if (++detailSampleIndex == SAMPLE_CAPACITY) detailSampleIndex = 0;
+         if (detailSampleCount < SAMPLE_CAPACITY) ++detailSampleCount;
+     }
+@@ -1098,6 +1234,23 @@ public final class KhopePerformanceDiagnostics {
+                 + ChatColor.GRAY + " | max " + ChatColor.RED + formatMs(SECTION_MAX_NANOS[section]));
+     }
+ 
++    private static void sendWorldSectionLine(CommandSender sender, int section) {
++        final long[] samples = snapshot(
++                worldSectionNanos[section],
++                detailSampleIndex,
++                detailSampleCount);
++        Arrays.sort(samples);
++
++        final long average = detailTickCount == 0L
++                ? 0L
++                : WORLD_SECTION_TOTAL_NANOS[section] / detailTickCount;
++        sender.sendMessage(ChatColor.GRAY + WORLD_SECTION_NAMES[section]
++                + " avg " + ChatColor.GREEN + formatMs(average)
++                + ChatColor.GRAY + " | p95 " + ChatColor.YELLOW + formatMs(percentile(samples, 95))
++                + ChatColor.GRAY + " | p99 " + ChatColor.YELLOW + formatMs(percentile(samples, 99))
++                + ChatColor.GRAY + " | max " + ChatColor.RED + formatMs(WORLD_SECTION_MAX_NANOS[section]));
++    }
++
+     private static void sendWorstSections(CommandSender sender, int limit) {
+         final boolean[] used = new boolean[SECTION_COUNT];
+ 
+@@ -1120,6 +1273,29 @@ public final class KhopePerformanceDiagnostics {
+         }
+     }
+ 
++    private static void sendWorstWorldSections(CommandSender sender, int limit) {
++        final boolean[] used = new boolean[WORLD_SECTION_COUNT];
++
++        for (int rank = 1; rank <= limit; ++rank) {
++            int bestSection = -1;
++            long bestNanos = -1L;
++
++            for (int section = 0; section < WORLD_SECTION_COUNT; ++section) {
++                if (!used[section] && WORST_WORLD_SECTION_NANOS[section] > bestNanos) {
++                    bestSection = section;
++                    bestNanos = WORST_WORLD_SECTION_NANOS[section];
++                }
++            }
++
++            if (bestSection < 0 || bestNanos <= 0L) return;
++
++            used[bestSection] = true;
++            sender.sendMessage(ChatColor.GRAY + "#" + rank + " "
++                    + WORLD_SECTION_NAMES[bestSection] + ": "
++                    + ChatColor.YELLOW + formatMs(bestNanos));
++        }
++    }
++
+     private static long[] snapshot(long[] source, int nextIndex, int count) {
+         if (count <= 0) return new long[0];
+ 
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index dff0f03c9..02de75c83 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -214,7 +214,24 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+     // CraftBukkit end
+ 
+     public void doTick() {
++        // KHopeSpigot start - 0160 WorldTick second-level attribution
++        //
++        // This is completely dormant outside an explicit /khope perf detail/jobs
++        // capture. During a capture, one nanoTime boundary is recorded around
++        // each major WorldServer.doTick() subsystem so the parent WorldTick
++        // section can be explained without changing tick order or gameplay.
++        final boolean khopeWorldDetail =
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.isDetailEnabledForCurrentTick();
++        long khopeWorldSectionStartNanos = khopeWorldDetail ? System.nanoTime() : 0L;
++
+         super.doTick();
++        if (khopeWorldDetail) {
++            khopeWorldSectionStartNanos =
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endWorldSection(
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.WORLD_SECTION_WEATHER,
++                            khopeWorldSectionStartNanos);
++        }
++
+         if (this.getWorldData().isHardcore() && this.getDifficulty() != EnumDifficulty.HARD) {
+             this.getWorldData().setDifficulty(EnumDifficulty.HARD);
+         }
+@@ -232,6 +249,13 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+ 
+         // CraftBukkit start - Only call spawner if we have players online and the world allows for mobs or animals
+         long time = this.worldData.getTime();
++        if (khopeWorldDetail) {
++            khopeWorldSectionStartNanos =
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endWorldSection(
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.WORLD_SECTION_BASE,
++                            khopeWorldSectionStartNanos);
++        }
++
+         if (this.getGameRules().getBoolean("doMobSpawning") && this.worldData.getType() != WorldType.DEBUG_ALL_BLOCK_STATES && (this.allowMonsters || this.allowAnimals) && !this.players.isEmpty()) {
+             timings.mobSpawn.startTiming(); // Spigot
+             this.R.a(this, this.allowMonsters && (this.ticksPerMonsterSpawns != 0 && time % this.ticksPerMonsterSpawns == 0L), this.allowAnimals && (this.ticksPerAnimalSpawns != 0 && time % this.ticksPerAnimalSpawns == 0L), time % 400L == 0L);
+@@ -239,6 +263,13 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+             // CraftBukkit end
+         }
+         // CraftBukkit end
++        if (khopeWorldDetail) {
++            khopeWorldSectionStartNanos =
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endWorldSection(
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.WORLD_SECTION_MOB_SPAWN,
++                            khopeWorldSectionStartNanos);
++        }
++
+         timings.doChunkUnload.startTiming(); // Spigot
+         this.methodProfiler.c("chunkSource");
+         this.chunkProvider.unloadChunks();
+@@ -254,36 +285,97 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+         }
+ 
+         timings.doChunkUnload.stopTiming(); // Spigot
++        if (khopeWorldDetail) {
++            khopeWorldSectionStartNanos =
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endWorldSection(
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.WORLD_SECTION_CHUNK_UNLOAD,
++                            khopeWorldSectionStartNanos);
++        }
++
+         this.methodProfiler.c("tickPending");
+         timings.scheduledBlocks.startTiming(); // Spigot
+         this.a(false);
+         timings.scheduledBlocks.stopTiming(); // Spigot
++        if (khopeWorldDetail) {
++            khopeWorldSectionStartNanos =
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endWorldSection(
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.WORLD_SECTION_SCHEDULED_TICKS,
++                            khopeWorldSectionStartNanos);
++        }
++
+         this.methodProfiler.c("tickBlocks");
+         timings.chunkTicks.startTiming(); // Spigot
+         this.h();
+         timings.chunkTicks.stopTiming(); // Spigot
++        if (khopeWorldDetail) {
++            khopeWorldSectionStartNanos =
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endWorldSection(
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.WORLD_SECTION_CHUNK_TICK,
++                            khopeWorldSectionStartNanos);
++        }
++
+         spigotConfig.antiXrayInstance.flushUpdates(this); // PaperSpigot
++        if (khopeWorldDetail) {
++            khopeWorldSectionStartNanos =
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endWorldSection(
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.WORLD_SECTION_ANTI_XRAY,
++                            khopeWorldSectionStartNanos);
++        }
++
+         this.methodProfiler.c("chunkMap");
+         timings.doChunkMap.startTiming(); // Spigot
+         this.manager.flush();
+         timings.doChunkMap.stopTiming(); // Spigot
++        if (khopeWorldDetail) {
++            khopeWorldSectionStartNanos =
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endWorldSection(
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.WORLD_SECTION_PLAYER_CHUNKS,
++                            khopeWorldSectionStartNanos);
++        }
++
+         this.methodProfiler.c("village");
+         timings.doVillages.startTiming(); // Spigot
+         this.villages.tick();
+         this.siegeManager.a();
+         timings.doVillages.stopTiming(); // Spigot
++        if (khopeWorldDetail) {
++            khopeWorldSectionStartNanos =
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endWorldSection(
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.WORLD_SECTION_VILLAGES,
++                            khopeWorldSectionStartNanos);
++        }
++
+         this.methodProfiler.c("portalForcer");
+         timings.doPortalForcer.startTiming(); // Spigot
+         this.Q.a(this.getTime());
+         timings.doPortalForcer.stopTiming(); // Spigot
++        if (khopeWorldDetail) {
++            khopeWorldSectionStartNanos =
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endWorldSection(
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.WORLD_SECTION_PORTAL_FORCER,
++                            khopeWorldSectionStartNanos);
++        }
++
+         this.methodProfiler.b();
+         timings.doSounds.startTiming(); // Spigot
+         this.ak();
+         timings.doSounds.stopTiming(); // PandaSpigot - Add missing doSounds timing stop
++        if (khopeWorldDetail) {
++            khopeWorldSectionStartNanos =
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endWorldSection(
++                            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.WORLD_SECTION_SOUNDS,
++                            khopeWorldSectionStartNanos);
++        }
+ 
+         timings.doChunkGC.startTiming(); // PandaSpigot - Add missing doChunkGC timing start
+         this.getWorld().processChunkGC(); // CraftBukkit
+         timings.doChunkGC.stopTiming(); // Spigot
++        if (khopeWorldDetail) {
++            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.endWorldSection(
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.WORLD_SECTION_CHUNK_GC,
++                    khopeWorldSectionStartNanos);
++        }
++        // KHopeSpigot end
+     }
+ 
+     public BiomeBase.BiomeMeta a(EnumCreatureType enumcreaturetype, BlockPosition blockposition) {
+-- 
+2.51.0.windows.1
+
