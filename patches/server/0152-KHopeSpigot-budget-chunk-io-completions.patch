@@ -1,0 +1,254 @@
+From 0ce8ad080689680ad2c08b7a558896a7e51bb8a9 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 09:58:24 +0200
+Subject: [PATCH] KHopeSpigot: budget chunk io completions
+
+---
+ .../pandaspigot/config/PandaSpigotConfig.java | 15 +++++
+ .../util/KhopePerformanceDiagnostics.java     | 55 +++++++++++++++++++
+ .../craftbukkit/chunkio/ChunkIOExecutor.java  | 34 +++++++++++-
+ .../util/AsynchronousExecutor.java            | 45 ++++++++++++++-
+ 4 files changed, 145 insertions(+), 4 deletions(-)
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+index be27901aa..67246ffba 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
++++ b/src/main/java/com/hpfxd/pandaspigot/config/PandaSpigotConfig.java
+@@ -127,5 +127,20 @@ public class PandaSpigotConfig {
+     public int tabSpamIncrement = 10;
+ 
+     public int tabSpamLimit = 500;
++
++    @Comment("Budget completed async chunk I/O tasks when they re-enter the main thread.\n" +
++            "Stage 1 disk/NBT reads stay asynchronous; only the synchronous completion stage\n" +
++            "(entities, structures, ChunkLoadEvent, neighbor bookkeeping and callbacks) is spread\n" +
++            "across ticks to avoid large ChunkIO spikes after teleports/exploration.")
++    public boolean budgetChunkIoCompletions = true;
++
++    @Comment("Maximum completed ChunkIO tasks finalized on the main thread per tick.\n" +
++            "Set to 0 or less to disable only the count cap.")
++    public int chunkIoCompletionMaxPerTick = 32;
++
++    @Comment("Target main-thread time budget, in milliseconds, for completed ChunkIO tasks per tick.\n" +
++            "A single completion cannot be preempted and may exceed this target.\n" +
++            "Set to 0 or less to disable only the time cap.")
++    public double chunkIoCompletionBudgetMs = 6.0D;
+ }
+ 
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+index baf8e2514..836a73701 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
++++ b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+@@ -173,6 +173,14 @@ public final class KhopePerformanceDiagnostics {
+     private static int playerChunkSubscriptionMaxActivePlayers;
+     private static int playerChunkSubscriptionMaxPending;
+ 
++    // 0152 - completed async ChunkIO tasks finalized on the main thread.
++    private static long chunkIoCompletionTicks;
++    private static long chunkIoCompletionsProcessed;
++    private static long chunkIoCompletionWorkNanos;
++    private static long chunkIoCompletionMaxTickNanos;
++    private static long chunkIoCompletionBudgetHits;
++    private static int chunkIoCompletionMaxPending;
++
+     // Current FutureTask context. Main-thread only while jobs tracing is active.
+     private static boolean jobTraceActive;
+     private static String currentJobCommand = "-";
+@@ -436,6 +444,30 @@ public final class KhopePerformanceDiagnostics {
+         }
+     }
+ 
++    public static void recordChunkIoCompletionBudget(
++            int processed,
++            int pending,
++            long workNanos,
++            boolean budgetHit) {
++        if (!isSlowPathCaptureEnabled()) {
++            return;
++        }
++
++        ++chunkIoCompletionTicks;
++        chunkIoCompletionsProcessed += processed;
++        chunkIoCompletionWorkNanos += Math.max(0L, workNanos);
++
++        if (workNanos > chunkIoCompletionMaxTickNanos) {
++            chunkIoCompletionMaxTickNanos = workNanos;
++        }
++        if (budgetHit) {
++            ++chunkIoCompletionBudgetHits;
++        }
++        if (pending > chunkIoCompletionMaxPending) {
++            chunkIoCompletionMaxPending = pending;
++        }
++    }
++
+     public static void recordSection(int section, long nanos) {
+         if (!detailThisTick
+                 || section < 0
+@@ -758,6 +790,22 @@ public final class KhopePerformanceDiagnostics {
+                         + playerChunkSubscriptionMaxPending);
+             }
+ 
++            if (chunkIoCompletionTicks > 0L) {
++                sender.sendMessage(ChatColor.GOLD + "--- ChunkIO completion budget 0152 ---");
++                sender.sendMessage(ChatColor.GRAY + "Completed: " + ChatColor.YELLOW
++                        + chunkIoCompletionsProcessed
++                        + ChatColor.GRAY + " | ticks active: " + ChatColor.YELLOW
++                        + chunkIoCompletionTicks
++                        + ChatColor.GRAY + " | budget hits: " + ChatColor.RED
++                        + chunkIoCompletionBudgetHits);
++                sender.sendMessage(ChatColor.GRAY + "Work: " + ChatColor.YELLOW
++                        + formatMs(chunkIoCompletionWorkNanos)
++                        + ChatColor.GRAY + " | max/tick " + ChatColor.RED
++                        + formatMs(chunkIoCompletionMaxTickNanos)
++                        + ChatColor.GRAY + " | max pending " + ChatColor.YELLOW
++                        + chunkIoCompletionMaxPending);
++            }
++
+             if (worstTracedJobNanos > 0L) {
+                 sender.sendMessage(ChatColor.GOLD + "--- Worst FutureTask attribution ---");
+                 sender.sendMessage(ChatColor.GRAY + "Task: " + ChatColor.RED + formatMs(worstTracedJobNanos)
+@@ -951,6 +999,13 @@ public final class KhopePerformanceDiagnostics {
+         playerChunkSubscriptionMaxActivePlayers = 0;
+         playerChunkSubscriptionMaxPending = 0;
+ 
++        chunkIoCompletionTicks = 0L;
++        chunkIoCompletionsProcessed = 0L;
++        chunkIoCompletionWorkNanos = 0L;
++        chunkIoCompletionMaxTickNanos = 0L;
++        chunkIoCompletionBudgetHits = 0L;
++        chunkIoCompletionMaxPending = 0;
++
+         jobTraceActive = false;
+         currentJobCommand = "-";
+         currentJobCommandNanos = 0L;
+diff --git a/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOExecutor.java b/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOExecutor.java
+index 69e5da4c6..461767f53 100644
+--- a/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOExecutor.java
++++ b/src/main/java/org/bukkit/craftbukkit/chunkio/ChunkIOExecutor.java
+@@ -26,11 +26,41 @@ public class ChunkIOExecutor {
+     }
+ 
+     public static void adjustPoolSize(int players) {
+-        int size = Math.max(BASE_THREADS, (int) Math.ceil(players / PLAYERS_PER_THREAD));
++        // KHopeSpigot - ceil must happen before truncation.
++        int size = Math.max(BASE_THREADS,
++                (int) Math.ceil((double) players / (double) PLAYERS_PER_THREAD));
+         instance.setActiveThreads(size);
+     }
+ 
+     public static void tick() {
+-        instance.finishActive();
++        final com.hpfxd.pandaspigot.config.PandaSpigotConfig config =
++                com.hpfxd.pandaspigot.config.PandaSpigotConfig.get();
++
++        final boolean budgeting = config != null && config.budgetChunkIoCompletions;
++        final int maxTasks = budgeting ? config.chunkIoCompletionMaxPerTick : 0;
++        final long budgetNanos = !budgeting || config.chunkIoCompletionBudgetMs <= 0.0D
++                ? 0L
++                : (long) (config.chunkIoCompletionBudgetMs * 1_000_000.0D);
++
++        final boolean diagnostics =
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.isSlowPathCaptureEnabled();
++        final long startNanos = diagnostics ? System.nanoTime() : 0L;
++
++        final int processed = instance.finishActive(maxTasks, budgetNanos);
++        final int pending = instance.getFinishedCount();
++
++        if (diagnostics) {
++            final long workNanos = System.nanoTime() - startNanos;
++            final boolean budgetHit = pending > 0
++                    && ((maxTasks > 0 && processed >= maxTasks)
++                    || (budgetNanos > 0L && workNanos >= budgetNanos));
++
++            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics
++                    .recordChunkIoCompletionBudget(
++                            processed,
++                            pending,
++                            workNanos,
++                            budgetHit);
++        }
+     }
+ }
+diff --git a/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java b/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java
+index 193c3621c..12495ca47 100644
+--- a/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java
++++ b/src/main/java/org/bukkit/craftbukkit/util/AsynchronousExecutor.java
+@@ -10,6 +10,7 @@ import java.util.concurrent.LinkedBlockingQueue;
+ import java.util.concurrent.ThreadFactory;
+ import java.util.concurrent.ThreadPoolExecutor;
+ import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
+ import java.util.concurrent.atomic.AtomicIntegerFieldUpdater;
+ 
+ import org.apache.commons.lang.Validate;
+@@ -84,6 +85,7 @@ public final class AsynchronousExecutor<P, T, C, E extends Throwable> {
+         public void run() {
+             if (initAsync()) {
+                 finished.add(this);
++                finishedCount.incrementAndGet();
+             }
+         }
+ 
+@@ -216,6 +218,7 @@ public final class AsynchronousExecutor<P, T, C, E extends Throwable> {
+ 
+     final CallBackProvider<P, T, C, E> provider;
+     final Queue<Task> finished = new ConcurrentLinkedQueue<Task>();
++    final AtomicInteger finishedCount = new AtomicInteger();
+     final Map<P, Task> tasks = new HashMap<P, Task>();
+     final ThreadPoolExecutor pool;
+ 
+@@ -342,10 +345,48 @@ public final class AsynchronousExecutor<P, T, C, E extends Throwable> {
+      * This is the 'heartbeat' that should be called synchronously to finish any pending tasks
+      */
+     public void finishActive() throws E {
++        this.finishActive(0, 0L);
++    }
++
++    /**
++     * Finishes completed async tasks on the calling thread with optional
++     * backpressure. A non-positive maxTasks or maxNanos disables that limit.
++     *
++     * The time budget is checked between tasks; an individual synchronous
++     * stage cannot be preempted.
++     *
++     * @return number of completed queue entries drained this call
++     */
++    public int finishActive(final int maxTasks, final long maxNanos) throws E {
+         final Queue<Task> finished = this.finished;
+-        while (!finished.isEmpty()) {
+-            finished.poll().finish();
++        final long startNanos = maxNanos > 0L ? System.nanoTime() : 0L;
++        int processed = 0;
++
++        while (true) {
++            if (maxTasks > 0 && processed >= maxTasks) {
++                break;
++            }
++
++            if (processed > 0 && maxNanos > 0L
++                    && System.nanoTime() - startNanos >= maxNanos) {
++                break;
++            }
++
++            final Task task = finished.poll();
++            if (task == null) {
++                break;
++            }
++
++            finishedCount.decrementAndGet();
++            task.finish();
++            ++processed;
+         }
++
++        return processed;
++    }
++
++    public int getFinishedCount() {
++        return Math.max(0, this.finishedCount.get());
+     }
+ 
+     public void setActiveThreads(final int coreSize) {
+-- 
+2.51.0.windows.1
+
