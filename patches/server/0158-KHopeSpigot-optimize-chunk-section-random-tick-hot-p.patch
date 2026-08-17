@@ -1,0 +1,151 @@
+From d94e30c08a998c64e325ea29f0270f93674ae17e Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 12:03:49 +0200
+Subject: [PATCH] KHopeSpigot: optimize chunk section random tick hot paths
+
+---
+ .../net/minecraft/server/ChunkSection.java    | 48 ++++++++++++-------
+ .../net/minecraft/server/WorldServer.java     | 33 ++++++++-----
+ 2 files changed, 53 insertions(+), 28 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/ChunkSection.java b/src/main/java/net/minecraft/server/ChunkSection.java
+index 907c57b8c..f5c53c78c 100644
+--- a/src/main/java/net/minecraft/server/ChunkSection.java
++++ b/src/main/java/net/minecraft/server/ChunkSection.java
+@@ -33,13 +33,24 @@ public class ChunkSection {
+     // CraftBukkit end
+ 
+     public IBlockData getType(int i, int j, int k) {
+-        IBlockData iblockdata = (IBlockData) Block.d.a(this.blockIds[j << 8 | k << 4 | i]);
++        return this.getTypeByIndex(j << 8 | k << 4 | i);
++    }
++
++    // KHopeSpigot start - 0158 packed section index fast path
++    //
++    // The internal section storage is already a packed 0..4095 array. Expose
++    // the existing lookup semantics by packed index so hot callers do not need
++    // to unpack random coordinates only to repack them again immediately.
++    public IBlockData getTypeByIndex(int index) {
++        IBlockData iblockdata = (IBlockData) Block.d.a(this.blockIds[index]);
+ 
+         return iblockdata != null ? iblockdata : Blocks.AIR.getBlockData();
+     }
++    // KHopeSpigot end
+ 
+     public void setType(int i, int j, int k, IBlockData iblockdata) {
+-        IBlockData iblockdata1 = this.getType(i, j, k);
++        final int index = j << 8 | k << 4 | i;
++        IBlockData iblockdata1 = this.getTypeByIndex(index);
+         Block block = iblockdata1.getBlock();
+         Block block1 = iblockdata.getBlock();
+ 
+@@ -57,7 +68,7 @@ public class ChunkSection {
+             }
+         }
+ 
+-        this.blockIds[j << 8 | k << 4 | i] = (char) Block.d.b(iblockdata);
++        this.blockIds[index] = (char) Block.d.b(iblockdata);
+         isDirty = true; // PaperSpigot
+     }
+ 
+@@ -102,24 +113,27 @@ public class ChunkSection {
+     }
+ 
+     public void recalcBlockCounts() {
+-        this.nonEmptyBlockCount = 0;
+-        this.tickingBlockCount = 0;
+-
+-        for (int i = 0; i < 16; ++i) {
+-            for (int j = 0; j < 16; ++j) {
+-                for (int k = 0; k < 16; ++k) {
+-                    Block block = this.b(i, j, k);
+-
+-                    if (block != Blocks.AIR) {
+-                        ++this.nonEmptyBlockCount;
+-                        if (block.isTicking()) {
+-                            ++this.tickingBlockCount;
+-                        }
+-                    }
++        int nonEmpty = 0;
++        int ticking = 0;
++
++        // KHopeSpigot start - 0158 flat section recount
++        // The old triple loop visited the same 4096 packed entries while
++        // rebuilding x/y/z indices on every iteration.
++        final int length = this.blockIds.length;
++        for (int index = 0; index < length; ++index) {
++            Block block = this.getTypeByIndex(index).getBlock();
++
++            if (block != Blocks.AIR) {
++                ++nonEmpty;
++                if (block.isTicking()) {
++                    ++ticking;
+                 }
+             }
+         }
++        // KHopeSpigot end
+ 
++        this.nonEmptyBlockCount = nonEmpty;
++        this.tickingBlockCount = ticking;
+     }
+ 
+     public char[] getIdArray() {
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index 8057c1e93..8f9973f99 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -387,9 +387,6 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+             }
+ 
+         } else {
+-            int i = 0;
+-            int j = 0;
+-
+             // CraftBukkit start
+             //for (Iterator iterator1 = this.chunkTickList.iterator(); iterator1.hasNext(); this.methodProfiler.b()) {
+             //    ChunkCoordIntPair chunkcoordintpair1 = (ChunkCoordIntPair) iterator1.next();
+@@ -504,19 +501,33 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+ 
+                             for (int l1 = 0; l1 < i1; ++l1) {
+                                 this.m = this.m * 3 + 1013904223;
+-                                int i2 = this.m >> 2;
+-                                int j2 = i2 & 15;
+-                                int k2 = i2 >> 8 & 15;
+-                                int l2 = i2 >> 16 & 15;
++                                final int randomBits = this.m >> 2;
++
++                                // KHopeSpigot start - 0158 packed random tick lookup
++                                // Preserve vanilla's exact x/z/y bit selection while
++                                // directly forming ChunkSection's packed array index.
++                                final int packedIndex =
++                                        (randomBits & 0x00F)
++                                        | ((randomBits >> 4) & 0x0F0)
++                                        | ((randomBits >> 8) & 0xF00);
+ 
+-                                ++j;
+-                                IBlockData iblockdata = chunksection.getType(j2, l2, k2);
++                                IBlockData iblockdata = chunksection.getTypeByIndex(packedIndex);
+                                 Block block = iblockdata.getBlock();
+ 
+                                 if (block.isTicking()) {
+-                                    ++i;
+-                                    block.a((World) this, new BlockPosition(j2 + k, l2 + khopeSectionY, k2 + l), iblockdata, this.random);
++                                    // Only unpack world coordinates for blocks that
++                                    // actually receive a random tick callback.
++                                    final int localX = packedIndex & 15;
++                                    final int localZ = packedIndex >> 4 & 15;
++                                    final int localY = packedIndex >> 8 & 15;
++
++                                    block.a(
++                                            (World) this,
++                                            new BlockPosition(localX + k, localY + khopeSectionY, localZ + l),
++                                            iblockdata,
++                                            this.random);
+                                 }
++                                // KHopeSpigot end
+                             }
+                         }
+                     }
+-- 
+2.51.0.windows.1
+
