@@ -1,0 +1,149 @@
+From b3b01bd9bcbe8cabed2c6afe495bf0831a3bc826 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 10:58:00 +0200
+Subject: [PATCH] KHopeSpigot: optimize world tick hot paths
+
+---
+ .../net/minecraft/server/WorldServer.java     | 47 ++++++++++++-------
+ 1 file changed, 31 insertions(+), 16 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index e95f93341..8057c1e93 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -224,9 +224,9 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+ 
+         // CraftBukkit start - Only call spawner if we have players online and the world allows for mobs or animals
+         long time = this.worldData.getTime();
+-        if (this.getGameRules().getBoolean("doMobSpawning") && this.worldData.getType() != WorldType.DEBUG_ALL_BLOCK_STATES && (this.allowMonsters || this.allowAnimals) && (this instanceof WorldServer && this.players.size() > 0)) {
++        if (this.getGameRules().getBoolean("doMobSpawning") && this.worldData.getType() != WorldType.DEBUG_ALL_BLOCK_STATES && (this.allowMonsters || this.allowAnimals) && !this.players.isEmpty()) {
+             timings.mobSpawn.startTiming(); // Spigot
+-            this.R.a(this, this.allowMonsters && (this.ticksPerMonsterSpawns != 0 && time % this.ticksPerMonsterSpawns == 0L), this.allowAnimals && (this.ticksPerAnimalSpawns != 0 && time % this.ticksPerAnimalSpawns == 0L), this.worldData.getTime() % 400L == 0L);
++            this.R.a(this, this.allowMonsters && (this.ticksPerMonsterSpawns != 0 && time % this.ticksPerMonsterSpawns == 0L), this.allowAnimals && (this.ticksPerAnimalSpawns != 0 && time % this.ticksPerAnimalSpawns == 0L), time % 400L == 0L);
+             timings.mobSpawn.stopTiming(); // Spigot
+             // CraftBukkit end
+         }
+@@ -404,6 +404,12 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+             // so reuse one direct ChunkProviderServer lookup instead.
+             final ChunkProviderServer khopeChunkProvider = this.chunkProviderServer;
+ 
++            // KHopeSpigot - 0155: world-level values are snapshotted once for
++            // this chunk-tick pass instead of map/config lookups per chunk.
++            final int khopeRandomTickSpeed = this.getGameRules().c("randomTickSpeed");
++            final boolean khopeDisableThunder = this.paperSpigotConfig.disableThunder;
++            final boolean khopeDisableIceAndSnow = this.paperSpigotConfig.disableIceAndSnow;
++
+             for (gnu.trove.iterator.TLongShortIterator iter = chunkTickList.iterator(); iter.hasNext(); )
+             {
+                 iter.advance();
+@@ -436,7 +442,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 int i1;
+                 BlockPosition blockposition;
+ 
+-                if (!this.paperSpigotConfig.disableThunder && this.random.nextInt(100000) == 0 && this.S() && this.R()) { // PaperSpigot - Disable thunder
++                if (!khopeDisableThunder && this.random.nextInt(100000) == 0 && this.S() && this.R()) { // PaperSpigot - Disable thunder
+                     this.m = this.m * 3 + 1013904223;
+                     i1 = this.m >> 2;
+                     blockposition = this.a(new BlockPosition(k + (i1 & 15), 0, l + (i1 >> 8 & 15)));
+@@ -446,7 +452,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 }
+ 
+                 this.methodProfiler.c("iceandsnow");
+-                if (!this.paperSpigotConfig.disableIceAndSnow && this.random.nextInt(16) == 0) { // PaperSpigot - Disable ice and snow
++                if (!khopeDisableIceAndSnow && this.random.nextInt(16) == 0) { // PaperSpigot - Disable ice and snow
+                     this.m = this.m * 3 + 1013904223;
+                     i1 = this.m >> 2;
+                     blockposition = this.q(new BlockPosition(k + (i1 & 15), 0, l + (i1 >> 8 & 15)));
+@@ -485,7 +491,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+ 
+                 this.methodProfiler.c("tickBlocks");
+                 timings.chunkTicksBlocks.startTiming(); // Spigot
+-                i1 = this.getGameRules().c("randomTickSpeed");
++                i1 = khopeRandomTickSpeed;
+                 if (i1 > 0) {
+                     ChunkSection[] achunksection = chunk.getSections();
+                     int j1 = achunksection.length;
+@@ -494,6 +500,8 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                         ChunkSection chunksection = achunksection[k1];
+ 
+                         if (chunksection != null && chunksection.shouldTick()) {
++                            final int khopeSectionY = chunksection.getYPosition();
++
+                             for (int l1 = 0; l1 < i1; ++l1) {
+                                 this.m = this.m * 3 + 1013904223;
+                                 int i2 = this.m >> 2;
+@@ -507,7 +515,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+ 
+                                 if (block.isTicking()) {
+                                     ++i;
+-                                    block.a((World) this, new BlockPosition(j2 + k, l2 + chunksection.getYPosition(), k2 + l), iblockdata, this.random);
++                                    block.a((World) this, new BlockPosition(j2 + k, l2 + khopeSectionY, k2 + l), iblockdata, this.random);
+                                 }
+                             }
+                         }
+@@ -648,9 +656,13 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 timings.scheduledBlocksCleanup.startTiming(); // Spigot
+                 NextTickListEntry nextticklistentry;
+ 
++                // KHopeSpigot - 0155: this cleanup phase runs without callbacks,
++                // so one time snapshot is enough for all due-entry comparisons.
++                final long khopeScheduledTime = this.worldData.getTime();
++
+                 for (int j = 0; j < i; ++j) {
+                     nextticklistentry = (NextTickListEntry) this.M.first();
+-                    if (!flag && nextticklistentry.b > this.worldData.getTime()) {
++                    if (!flag && nextticklistentry.b > khopeScheduledTime) {
+                         break;
+                     }
+ 
+@@ -665,7 +677,7 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                     Iterator<NextTickListEntry> iterator = this.M.iterator();
+                     while (iterator.hasNext()) {
+                         NextTickListEntry next = iterator.next();
+-                        if (!flag && next.b > this.worldData.getTime()) {
++                        if (!flag && next.b > khopeScheduledTime) {
+                             break;
+                         }
+ 
+@@ -685,27 +697,30 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+                 while (iterator.hasNext()) {
+                     nextticklistentry = (NextTickListEntry) iterator.next();
+                     iterator.remove();
+-                    byte b0 = 0;
+ 
+-                    if (this.areChunksLoadedBetween(nextticklistentry.a.a(-b0, -b0, -b0), nextticklistentry.a.a(b0, b0, b0))) {
+-                        IBlockData iblockdata = this.getType(nextticklistentry.a);
+-                        co.aikar.timings.Timing timing = iblockdata.getBlock().getTiming(); // Spigot
++                    final BlockPosition khopeTickPosition = nextticklistentry.a;
++                    final Block khopeScheduledBlock = nextticklistentry.a();
++
++                    if (this.areChunksLoadedBetween(khopeTickPosition, khopeTickPosition)) {
++                        IBlockData iblockdata = this.getType(khopeTickPosition);
++                        final Block khopeCurrentBlock = iblockdata.getBlock();
++                        co.aikar.timings.Timing timing = khopeCurrentBlock.getTiming(); // Spigot
+                         timing.startTiming(); // Spigot
+ 
+-                        if (iblockdata.getBlock().getMaterial() != Material.AIR && Block.a(iblockdata.getBlock(), nextticklistentry.a())) {
++                        if (khopeCurrentBlock.getMaterial() != Material.AIR && Block.a(khopeCurrentBlock, khopeScheduledBlock)) {
+                             try {
+-                                iblockdata.getBlock().b((World) this, nextticklistentry.a, iblockdata, this.random);
++                                khopeCurrentBlock.b((World) this, khopeTickPosition, iblockdata, this.random);
+                             } catch (Throwable throwable) {
+                                 CrashReport crashreport = CrashReport.a(throwable, "Exception while ticking a block");
+                                 CrashReportSystemDetails crashreportsystemdetails = crashreport.a("Block being ticked");
+ 
+-                                CrashReportSystemDetails.a(crashreportsystemdetails, nextticklistentry.a, iblockdata);
++                                CrashReportSystemDetails.a(crashreportsystemdetails, khopeTickPosition, iblockdata);
+                                 throw new ReportedException(crashreport);
+                             }
+                         }
+                         timing.stopTiming(); // Spigot
+                     } else {
+-                        this.a(nextticklistentry.a, nextticklistentry.a(), 0);
++                        this.a(khopeTickPosition, khopeScheduledBlock, 0);
+                     }
+                 }
+                 timings.scheduledBlocksTicking.stopTiming(); // Spigot
+-- 
+2.51.0.windows.1
+
