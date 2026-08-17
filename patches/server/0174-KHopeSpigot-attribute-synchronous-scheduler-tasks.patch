@@ -1,0 +1,161 @@
+From e480509a95720c11b60f5ba61a97248a070bd18e Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 18:23:38 +0200
+Subject: [PATCH] KHopeSpigot: attribute synchronous scheduler tasks
+
+---
+ .../util/KhopePerformanceDiagnostics.java     | 70 +++++++++++++++++++
+ .../craftbukkit/scheduler/CraftScheduler.java | 14 ++++
+ 2 files changed, 84 insertions(+)
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+index fcfb5b8a..493d2e92 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
++++ b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+@@ -10,6 +10,7 @@ import java.util.Locale;
+ 
+ import org.bukkit.ChatColor;
+ import org.bukkit.command.CommandSender;
++import org.bukkit.plugin.Plugin;
+ 
+ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.WorldServer;
+@@ -167,6 +168,20 @@ public final class KhopePerformanceDiagnostics {
+     private static long jobsOver10Ms;
+     private static long jobsOver50Ms;
+ 
++    // 0174 - synchronous BukkitScheduler task attribution. Only active during
++    // an explicit /khope perf jobs capture.
++    private static long bukkitSchedulerTaskCount;
++    private static long bukkitSchedulerTaskWorkNanos;
++    private static long bukkitSchedulerMaxTaskNanos;
++    private static long bukkitSchedulerTasksOver1Ms;
++    private static long bukkitSchedulerTasksOver5Ms;
++    private static long bukkitSchedulerTasksOver10Ms;
++    private static long bukkitSchedulerTasksOver50Ms;
++    private static String worstBukkitSchedulerPlugin = "-";
++    private static int worstBukkitSchedulerTaskId = -1;
++    private static String worstBukkitSchedulerTaskClass = "-";
++    private static long worstBukkitSchedulerTaskPeriod;
++
+     private static int currentJobCount;
+     private static long currentJobWorkNanos;
+     private static long currentJobMaxNanos;
+@@ -675,6 +690,32 @@ public final class KhopePerformanceDiagnostics {
+         jobsOver50Ms += over50Ms;
+     }
+ 
++    public static void recordBukkitSchedulerTask(
++            Plugin owner,
++            int taskId,
++            Class<? extends Runnable> taskClass,
++            long period,
++            long nanos) {
++        if (!jobsThisTick || skipCurrentTick || nanos < 0L) {
++            return;
++        }
++
++        ++bukkitSchedulerTaskCount;
++        bukkitSchedulerTaskWorkNanos += nanos;
++        if (nanos > 1_000_000L) ++bukkitSchedulerTasksOver1Ms;
++        if (nanos > 5_000_000L) ++bukkitSchedulerTasksOver5Ms;
++        if (nanos > 10_000_000L) ++bukkitSchedulerTasksOver10Ms;
++        if (nanos > 50_000_000L) ++bukkitSchedulerTasksOver50Ms;
++
++        if (nanos > bukkitSchedulerMaxTaskNanos) {
++            bukkitSchedulerMaxTaskNanos = nanos;
++            worstBukkitSchedulerPlugin = owner == null ? "<none>" : owner.getName();
++            worstBukkitSchedulerTaskId = taskId;
++            worstBukkitSchedulerTaskClass = taskClass == null ? "<unknown>" : taskClass.getName();
++            worstBukkitSchedulerTaskPeriod = period;
++        }
++    }
++
+     public static void recordTick(long nanos) {
+         if (skipCurrentTick) {
+             skipCurrentTick = false;
+@@ -907,6 +948,22 @@ public final class KhopePerformanceDiagnostics {
+                         + ChatColor.GRAY + " | >50ms: " + ChatColor.DARK_RED + jobsOver50Ms);
+             }
+ 
++            if (bukkitSchedulerTaskCount > 0L) {
++                sender.sendMessage(ChatColor.GOLD + "--- BukkitScheduler task attribution 0174 ---");
++                sender.sendMessage(ChatColor.GRAY + "Sync tasks: " + ChatColor.YELLOW + bukkitSchedulerTaskCount
++                        + ChatColor.GRAY + " | avg " + ChatColor.GREEN
++                        + formatMs(bukkitSchedulerTaskWorkNanos / bukkitSchedulerTaskCount)
++                        + ChatColor.GRAY + " | max " + ChatColor.RED + formatMs(bukkitSchedulerMaxTaskNanos));
++                sender.sendMessage(ChatColor.GRAY + "Slow >1ms: " + ChatColor.YELLOW + bukkitSchedulerTasksOver1Ms
++                        + ChatColor.GRAY + " | >5ms: " + ChatColor.GOLD + bukkitSchedulerTasksOver5Ms
++                        + ChatColor.GRAY + " | >10ms: " + ChatColor.RED + bukkitSchedulerTasksOver10Ms
++                        + ChatColor.GRAY + " | >50ms: " + ChatColor.DARK_RED + bukkitSchedulerTasksOver50Ms);
++                sender.sendMessage(ChatColor.GRAY + "Worst: " + ChatColor.RED + worstBukkitSchedulerPlugin
++                        + ChatColor.GRAY + " task #" + ChatColor.YELLOW + worstBukkitSchedulerTaskId
++                        + ChatColor.GRAY + " | period " + ChatColor.YELLOW + worstBukkitSchedulerTaskPeriod);
++                sender.sendMessage(ChatColor.GRAY + "Class: " + ChatColor.YELLOW + worstBukkitSchedulerTaskClass);
++            }
++
+             sender.sendMessage(ChatColor.GOLD + "--- Pire tick detail #" + detailWorstTickNumber
+                     + ": " + formatMs(detailWorstTickNanos) + " ---");
+             sendWorstSections(sender, 6);
+@@ -1297,6 +1354,19 @@ public final class KhopePerformanceDiagnostics {
+         jobsOver5Ms = 0L;
+         jobsOver10Ms = 0L;
+         jobsOver50Ms = 0L;
++
++        bukkitSchedulerTaskCount = 0L;
++        bukkitSchedulerTaskWorkNanos = 0L;
++        bukkitSchedulerMaxTaskNanos = 0L;
++        bukkitSchedulerTasksOver1Ms = 0L;
++        bukkitSchedulerTasksOver5Ms = 0L;
++        bukkitSchedulerTasksOver10Ms = 0L;
++        bukkitSchedulerTasksOver50Ms = 0L;
++        worstBukkitSchedulerPlugin = "-";
++        worstBukkitSchedulerTaskId = -1;
++        worstBukkitSchedulerTaskClass = "-";
++        worstBukkitSchedulerTaskPeriod = 0L;
++
+         currentJobCount = 0;
+         currentJobWorkNanos = 0L;
+         currentJobMaxNanos = 0L;
+diff --git a/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java b/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java
+index f036709c..bc52bbd2 100644
+--- a/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java
++++ b/src/main/java/org/bukkit/craftbukkit/scheduler/CraftScheduler.java
+@@ -337,6 +337,9 @@ public class CraftScheduler implements BukkitScheduler {
+     public void mainThreadHeartbeat(final int currentTick) {
+         this.currentTick = currentTick;
+         final List<CraftTask> temp = this.temp;
++        // KHopeSpigot - one capture-state read per heartbeat, zero nanoTime calls while jobs capture is off
++        final boolean khopeJobs =
++                com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.isJobsEnabledForCurrentTick();
+         parsePending();
+         while (isReady(currentTick)) {
+             final CraftTask task = pending.remove();
+@@ -348,6 +351,8 @@ public class CraftScheduler implements BukkitScheduler {
+                 continue;
+             }
+             if (task.isSync()) {
++                // KHopeSpigot start - attribute slow synchronous plugin tasks during jobs capture
++                final long khopeTaskStartNanos = khopeJobs ? System.nanoTime() : 0L;
+                 try {
+                     task.run();
+                 } catch (final Throwable throwable) {
+@@ -365,6 +370,15 @@ public class CraftScheduler implements BukkitScheduler {
+                     );
+                     // Paper end
+                 }
++                if (khopeJobs) {
++                    com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordBukkitSchedulerTask(
++                            task.getOwner(),
++                            task.getTaskId(),
++                            task.task == null ? null : task.getTaskClass(),
++                            task.getPeriod(),
++                            System.nanoTime() - khopeTaskStartNanos);
++                }
++                // KHopeSpigot end
+                 parsePending();
+             } else {
+                 debugTail = debugTail.setNext(new CraftAsyncDebugger(currentTick + RECENT_TICKS, task.getOwner(), task.getTaskClass()));
+-- 
+2.51.0.windows.1
+
