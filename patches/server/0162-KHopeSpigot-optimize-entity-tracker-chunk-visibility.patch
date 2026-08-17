@@ -1,0 +1,280 @@
+From 98d517faf3431df1d98c1af0b1d31ead752f86f7 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 14:56:02 +0200
+Subject: [PATCH] KHopeSpigot: optimize entity tracker chunk visibility
+
+---
+ .../util/KhopePerformanceDiagnostics.java     | 107 ++++++++++++++++++
+ .../net/minecraft/server/EntityTracker.java   |  63 ++++++++++-
+ .../minecraft/server/EntityTrackerEntry.java  |   8 +-
+ 3 files changed, 168 insertions(+), 10 deletions(-)
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+index 2a29f9035..665c280ed 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
++++ b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+@@ -227,6 +227,18 @@ public final class KhopePerformanceDiagnostics {
+     private static long chunkIoCompletionBudgetHits;
+     private static int chunkIoCompletionMaxPending;
+ 
++    // 0162 - EntityTracker scaling diagnostics. Only touched while an explicit
++    // jobs capture is active, so normal production mode remains a cheap branch.
++    private static long entityTrackerTicks;
++    private static long entityTrackerEntriesVisited;
++    private static long entityTrackerMovedPlayers;
++    private static long entityTrackerMovedPlayerEntryChecks;
++
++    private static long entityTrackerChunkRefreshes;
++    private static long entityTrackerChunkLegacyEntryChecks;
++    private static long entityTrackerChunkLocalEntityChecks;
++    private static long entityTrackerChunkTrackedCandidates;
++
+     // Current FutureTask context. Main-thread only while jobs tracing is active.
+     private static boolean jobTraceActive;
+     private static String currentJobCommand = "-";
+@@ -517,6 +529,37 @@ public final class KhopePerformanceDiagnostics {
+         }
+     }
+ 
++    public static void recordEntityTrackerTick(
++            int trackerEntries,
++            int movedPlayers) {
++        if (!jobsThisTick) {
++            return;
++        }
++
++        final int safeEntries = Math.max(0, trackerEntries);
++        final int safeMovedPlayers = Math.max(0, movedPlayers);
++
++        ++entityTrackerTicks;
++        entityTrackerEntriesVisited += safeEntries;
++        entityTrackerMovedPlayers += safeMovedPlayers;
++        entityTrackerMovedPlayerEntryChecks +=
++                (long) safeEntries * (long) safeMovedPlayers;
++    }
++
++    public static void recordEntityTrackerChunkRefresh(
++            int trackerEntries,
++            int localEntityCandidates,
++            int localTrackedCandidates) {
++        if (!jobsThisTick) {
++            return;
++        }
++
++        ++entityTrackerChunkRefreshes;
++        entityTrackerChunkLegacyEntryChecks += Math.max(0, trackerEntries);
++        entityTrackerChunkLocalEntityChecks += Math.max(0, localEntityCandidates);
++        entityTrackerChunkTrackedCandidates += Math.max(0, localTrackedCandidates);
++    }
++
+     public static void recordSection(int section, long nanos) {
+         if (!detailThisTick
+                 || section < 0
+@@ -900,6 +943,60 @@ public final class KhopePerformanceDiagnostics {
+                         + chunkIoCompletionMaxPending);
+             }
+ 
++            if (entityTrackerTicks > 0L || entityTrackerChunkRefreshes > 0L) {
++                sender.sendMessage(ChatColor.GOLD + "--- EntityTracker scaling 0162 ---");
++
++                if (entityTrackerTicks > 0L) {
++                    sender.sendMessage(ChatColor.GRAY + "Tracker ticks: " + ChatColor.YELLOW
++                            + entityTrackerTicks
++                            + ChatColor.GRAY + " | avg entries/tick: " + ChatColor.YELLOW
++                            + formatDouble((double) entityTrackerEntriesVisited
++                                    / (double) entityTrackerTicks)
++                            + ChatColor.GRAY + " | moved players: " + ChatColor.YELLOW
++                            + entityTrackerMovedPlayers);
++
++                    sender.sendMessage(ChatColor.GRAY + "Moved-player full entry checks: "
++                            + ChatColor.YELLOW
++                            + entityTrackerMovedPlayerEntryChecks);
++                }
++
++                if (entityTrackerChunkRefreshes > 0L) {
++                    final long avoidedChecks = Math.max(
++                            0L,
++                            entityTrackerChunkLegacyEntryChecks
++                                    - entityTrackerChunkLocalEntityChecks);
++
++                    final double reduction =
++                            entityTrackerChunkLegacyEntryChecks == 0L
++                                    ? 0.0D
++                                    : (100.0D * (double) avoidedChecks
++                                            / (double) entityTrackerChunkLegacyEntryChecks);
++
++                    sender.sendMessage(ChatColor.GRAY + "Chunk refreshes: "
++                            + ChatColor.YELLOW
++                            + entityTrackerChunkRefreshes
++                            + ChatColor.GRAY + " | old global checks: "
++                            + ChatColor.RED
++                            + entityTrackerChunkLegacyEntryChecks
++                            + ChatColor.GRAY + " | local entity checks: "
++                            + ChatColor.GREEN
++                            + entityTrackerChunkLocalEntityChecks);
++
++                    sender.sendMessage(ChatColor.GRAY + "Tracked local candidates: "
++                            + ChatColor.YELLOW
++                            + entityTrackerChunkTrackedCandidates
++                            + ChatColor.GRAY + " | scan checks avoided: "
++                            + ChatColor.GREEN
++                            + avoidedChecks
++                            + ChatColor.GRAY + " ("
++                            + ChatColor.GREEN
++                            + formatDouble(reduction)
++                            + "%"
++                            + ChatColor.GRAY
++                            + ")");
++                }
++            }
++
+             if (worstTracedJobNanos > 0L) {
+                 sender.sendMessage(ChatColor.GOLD + "--- Worst FutureTask attribution ---");
+                 sender.sendMessage(ChatColor.GRAY + "Task: " + ChatColor.RED + formatMs(worstTracedJobNanos)
+@@ -1115,6 +1212,16 @@ public final class KhopePerformanceDiagnostics {
+         chunkIoCompletionBudgetHits = 0L;
+         chunkIoCompletionMaxPending = 0;
+ 
++        entityTrackerTicks = 0L;
++        entityTrackerEntriesVisited = 0L;
++        entityTrackerMovedPlayers = 0L;
++        entityTrackerMovedPlayerEntryChecks = 0L;
++
++        entityTrackerChunkRefreshes = 0L;
++        entityTrackerChunkLegacyEntryChecks = 0L;
++        entityTrackerChunkLocalEntityChecks = 0L;
++        entityTrackerChunkTrackedCandidates = 0L;
++
+         jobTraceActive = false;
+         currentJobCommand = "-";
+         currentJobCommandNanos = 0L;
+diff --git a/src/main/java/net/minecraft/server/EntityTracker.java b/src/main/java/net/minecraft/server/EntityTracker.java
+index d36796862..1c4f496ad 100644
+--- a/src/main/java/net/minecraft/server/EntityTracker.java
++++ b/src/main/java/net/minecraft/server/EntityTracker.java
+@@ -1,8 +1,10 @@
+ package net.minecraft.server;
+ 
+ import com.google.common.collect.Sets;
++import com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics;
+ import java.util.ArrayList;
+ import java.util.Iterator;
++import java.util.List;
+ import java.util.Set;
+ import java.util.concurrent.Callable;
+ import org.apache.logging.log4j.LogManager;
+@@ -186,7 +188,10 @@ public class EntityTracker {
+             }
+         }
+ 
+-        for (int i = 0, size = movedPlayers.size(); i < size; ++i) {
++        final int trackerEntryCount = this.c.size();
++        final int movedPlayerCount = movedPlayers.size();
++
++        for (int i = 0; i < movedPlayerCount; ++i) {
+             EntityPlayer entityplayer = movedPlayers.get(i);
+             Iterator iterator1 = this.c.iterator();
+ 
+@@ -198,6 +203,11 @@ public class EntityTracker {
+                 }
+             }
+         }
++
++        if (KhopePerformanceDiagnostics.isJobsEnabledForCurrentTick()) {
++            KhopePerformanceDiagnostics.recordEntityTrackerTick(
++                    trackerEntryCount, movedPlayerCount);
++        }
+     }
+ 
+     public void a(EntityPlayer entityplayer) {
+@@ -245,15 +255,56 @@ public class EntityTracker {
+     }
+ 
+     public void a(EntityPlayer entityplayer, Chunk chunk) {
+-        Iterator iterator = this.c.iterator();
++        // KHopeSpigot start - 0162 entity tracker chunk-local visibility refresh
++        // This path runs after a chunk is sent to a player. Vanilla/CraftBukkit
++        // scanned every tracked entity for every delivered chunk and then kept
++        // only entries whose cached chunk coordinates matched. Iterate the
++        // chunk's authoritative entity slices instead and resolve only the
++        // entities that are actually tracked.
++        final List<Entity>[] entitySlices = chunk.entitySlices;
++        final boolean captureScaling =
++                KhopePerformanceDiagnostics.isJobsEnabledForCurrentTick();
++        int localEntityCandidates = 0;
++        int localTrackedCandidates = 0;
++
++        for (int sliceIndex = 0; sliceIndex < entitySlices.length; ++sliceIndex) {
++            final List<Entity> entities = entitySlices[sliceIndex];
++            final int entityCount = entities.size();
++
++            if (captureScaling) {
++                localEntityCandidates += entityCount;
++            }
+ 
+-        while (iterator.hasNext()) {
+-            EntityTrackerEntry entitytrackerentry = (EntityTrackerEntry) iterator.next();
++            for (int entityIndex = 0; entityIndex < entityCount; ++entityIndex) {
++                final Entity entity = entities.get(entityIndex);
+ 
+-            if (entitytrackerentry.tracker != entityplayer && entitytrackerentry.tracker.ae == chunk.locX && entitytrackerentry.tracker.ag == chunk.locZ) {
+-                entitytrackerentry.updatePlayer(entityplayer);
++                if (entity == entityplayer) {
++                    continue;
++                }
++
++                final EntityTrackerEntry entitytrackerentry =
++                        this.trackedEntities.get(entity.getId());
++
++                if (entitytrackerentry != null
++                        && entitytrackerentry.tracker == entity
++                        && entitytrackerentry.tracker.ae == chunk.locX
++                        && entitytrackerentry.tracker.ag == chunk.locZ) {
++
++                    if (captureScaling) {
++                        ++localTrackedCandidates;
++                    }
++
++                    entitytrackerentry.updatePlayer(entityplayer);
++                }
+             }
+         }
+ 
++        if (captureScaling) {
++            KhopePerformanceDiagnostics.recordEntityTrackerChunkRefresh(
++                    this.c.size(),
++                    localEntityCandidates,
++                    localTrackedCandidates);
++        }
++        // KHopeSpigot end
+     }
+ }
+diff --git a/src/main/java/net/minecraft/server/EntityTrackerEntry.java b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+index 0b90b6f30..8dbe97f07 100644
+--- a/src/main/java/net/minecraft/server/EntityTrackerEntry.java
++++ b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+@@ -426,8 +426,8 @@ public class EntityTrackerEntry {
+                         }
+                     }
+                 }
+-            } else if (this.trackedPlayers.contains(entityplayer)) {
+-                this.trackedPlayers.remove(entityplayer);
++            } else if (this.trackedPlayers.remove(entityplayer)) {
++                // KHopeSpigot - 0162 avoid contains()+remove() double hash lookup
+                 entityplayer.d(this.tracker);
+             }
+ 
+@@ -566,8 +566,8 @@ public class EntityTrackerEntry {
+ 
+     public void clear(EntityPlayer entityplayer) {
+         org.spigotmc.AsyncCatcher.catchOp( "player tracker clear"); // Spigot
+-        if (this.trackedPlayers.contains(entityplayer)) {
+-            this.trackedPlayers.remove(entityplayer);
++        if (this.trackedPlayers.remove(entityplayer)) {
++            // KHopeSpigot - 0162 avoid contains()+remove() double hash lookup
+             entityplayer.d(this.tracker);
+         }
+ 
+-- 
+2.51.0.windows.1
+
