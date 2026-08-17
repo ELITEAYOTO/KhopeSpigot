@@ -1,0 +1,75 @@
+From 8aef8aa2103335e5383f8700869068cf63042c39 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 17:29:29 +0200
+Subject: [PATCH] KHopeSpigot: optimize player info packet allocations
+
+---
+ .../server/PacketPlayOutPlayerInfo.java       | 19 +++++++++++++++----
+ 1 file changed, 15 insertions(+), 4 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutPlayerInfo.java b/src/main/java/net/minecraft/server/PacketPlayOutPlayerInfo.java
+index 2e961af6..f4e34aeb 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutPlayerInfo.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutPlayerInfo.java
+@@ -1,21 +1,25 @@
+ package net.minecraft.server;
+ 
+ import com.google.common.base.Objects;
+-import com.google.common.collect.Lists;
+ import com.mojang.authlib.GameProfile;
+ import com.mojang.authlib.properties.Property;
+ import java.io.IOException;
++import java.util.ArrayList;
++import java.util.Collection;
+ import java.util.List;
+ 
+ public class PacketPlayOutPlayerInfo implements Packet<PacketListenerPlayOut> {
+ 
+     private PacketPlayOutPlayerInfo.EnumPlayerInfoAction a;
+-    private final List<PacketPlayOutPlayerInfo.PlayerInfoData> b = Lists.newArrayList();
++    private final List<PacketPlayOutPlayerInfo.PlayerInfoData> b;
+ 
+-    public PacketPlayOutPlayerInfo() {}
++    public PacketPlayOutPlayerInfo() {
++        this.b = new ArrayList<PacketPlayOutPlayerInfo.PlayerInfoData>(4);
++    }
+ 
+     public PacketPlayOutPlayerInfo(PacketPlayOutPlayerInfo.EnumPlayerInfoAction packetplayoutplayerinfo_enumplayerinfoaction, EntityPlayer... aentityplayer) {
+         this.a = packetplayoutplayerinfo_enumplayerinfoaction;
++        this.b = new ArrayList<PacketPlayOutPlayerInfo.PlayerInfoData>(aentityplayer.length); // KHopeSpigot - exact capacity for player-info snapshot
+ 
+         for (EntityPlayer entityplayer : aentityplayer) {
+             this.b.add(new PacketPlayOutPlayerInfo.PlayerInfoData(entityplayer.getProfile(), entityplayer.ping, entityplayer.playerInteractManager.getGameMode(), entityplayer.getPlayerListName()));
+@@ -25,6 +29,10 @@ public class PacketPlayOutPlayerInfo implements Packet<PacketListenerPlayOut> {
+ 
+     public PacketPlayOutPlayerInfo(PacketPlayOutPlayerInfo.EnumPlayerInfoAction packetplayoutplayerinfo_enumplayerinfoaction, Iterable<EntityPlayer> iterable) {
+         this.a = packetplayoutplayerinfo_enumplayerinfoaction;
++        // KHopeSpigot - avoid repeated backing-array growth for large tab snapshots
++        this.b = iterable instanceof Collection
++                ? new ArrayList<PacketPlayOutPlayerInfo.PlayerInfoData>(((Collection<?>) iterable).size())
++                : new ArrayList<PacketPlayOutPlayerInfo.PlayerInfoData>();
+ 
+         for (EntityPlayer entityplayer : iterable) {
+             this.b.add(new PacketPlayOutPlayerInfo.PlayerInfoData(entityplayer.getProfile(), entityplayer.ping, entityplayer.playerInteractManager.getGameMode(), entityplayer.getPlayerListName()));
+@@ -94,7 +102,9 @@ public class PacketPlayOutPlayerInfo implements Packet<PacketListenerPlayOut> {
+         packetdataserializer.a((Enum) this.a);
+         packetdataserializer.b(this.b.size());
+ 
+-        for (PacketPlayOutPlayerInfo.PlayerInfoData packetplayoutplayerinfo_playerinfodata : this.b) {
++        // KHopeSpigot start - avoid iterator allocation on every packet encoding
++        for (int i = 0, size = this.b.size(); i < size; ++i) {
++            PacketPlayOutPlayerInfo.PlayerInfoData packetplayoutplayerinfo_playerinfodata = this.b.get(i);
+             switch (this.a) {
+                 case ADD_PLAYER:
+                     packetdataserializer.a(packetplayoutplayerinfo_playerinfodata.a().getId());
+@@ -142,6 +152,7 @@ public class PacketPlayOutPlayerInfo implements Packet<PacketListenerPlayOut> {
+                     packetdataserializer.a(packetplayoutplayerinfo_playerinfodata.a().getId());
+             }
+         }
++        // KHopeSpigot end
+ 
+     }
+ 
+-- 
+2.51.0.windows.1
+
