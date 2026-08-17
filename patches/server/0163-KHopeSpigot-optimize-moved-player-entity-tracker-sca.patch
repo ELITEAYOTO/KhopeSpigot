@@ -1,0 +1,365 @@
+From 43d8ddc04b5b268b0ec7e6bdbff458d454a1f9f0 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 15:10:51 +0200
+Subject: [PATCH] KHopeSpigot: optimize moved-player entity tracker scaling
+
+---
+ .../util/KhopePerformanceDiagnostics.java     |  72 +++++++-
+ .../net/minecraft/server/EntityPlayer.java    |   4 +
+ .../net/minecraft/server/EntityTracker.java   | 159 +++++++++++++++++-
+ .../minecraft/server/EntityTrackerEntry.java  |   5 +
+ 4 files changed, 229 insertions(+), 11 deletions(-)
+
+diff --git a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+index 665c280ed..0b4ca25d6 100644
+--- a/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
++++ b/src/main/java/com/hpfxd/pandaspigot/util/KhopePerformanceDiagnostics.java
+@@ -239,6 +239,13 @@ public final class KhopePerformanceDiagnostics {
+     private static long entityTrackerChunkLocalEntityChecks;
+     private static long entityTrackerChunkTrackedCandidates;
+ 
++    // 0163 - moved-player reverse/spatial refresh diagnostics.
++    private static long entityTrackerMovedReverseChecks;
++    private static long entityTrackerMovedLoadedChunkScans;
++    private static long entityTrackerMovedLocalEntityChecks;
++    private static long entityTrackerMovedCandidateUpdates;
++    private static long entityTrackerMovedGlobalFallbackChecks;
++
+     // Current FutureTask context. Main-thread only while jobs tracing is active.
+     private static boolean jobTraceActive;
+     private static String currentJobCommand = "-";
+@@ -560,6 +567,23 @@ public final class KhopePerformanceDiagnostics {
+         entityTrackerChunkTrackedCandidates += Math.max(0, localTrackedCandidates);
+     }
+ 
++    public static void recordEntityTrackerMovedPlayerRefresh(
++            int reverseChecks,
++            int loadedChunkScans,
++            int localEntityChecks,
++            int candidateUpdates,
++            int globalFallbackChecks) {
++        if (!jobsThisTick) {
++            return;
++        }
++
++        entityTrackerMovedReverseChecks += Math.max(0, reverseChecks);
++        entityTrackerMovedLoadedChunkScans += Math.max(0, loadedChunkScans);
++        entityTrackerMovedLocalEntityChecks += Math.max(0, localEntityChecks);
++        entityTrackerMovedCandidateUpdates += Math.max(0, candidateUpdates);
++        entityTrackerMovedGlobalFallbackChecks += Math.max(0, globalFallbackChecks);
++    }
++
+     public static void recordSection(int section, long nanos) {
+         if (!detailThisTick
+                 || section < 0
+@@ -955,9 +979,48 @@ public final class KhopePerformanceDiagnostics {
+                             + ChatColor.GRAY + " | moved players: " + ChatColor.YELLOW
+                             + entityTrackerMovedPlayers);
+ 
+-                    sender.sendMessage(ChatColor.GRAY + "Moved-player full entry checks: "
+-                            + ChatColor.YELLOW
++                    sender.sendMessage(ChatColor.GRAY + "Moved-player full entry checks (legacy): "
++                            + ChatColor.RED
+                             + entityTrackerMovedPlayerEntryChecks);
++
++                    final long movedActualChecks =
++                            entityTrackerMovedReverseChecks
++                                    + entityTrackerMovedLocalEntityChecks
++                                    + entityTrackerMovedGlobalFallbackChecks;
++                    final long movedAvoidedChecks = Math.max(
++                            0L,
++                            entityTrackerMovedPlayerEntryChecks - movedActualChecks);
++                    final double movedReduction =
++                            entityTrackerMovedPlayerEntryChecks == 0L
++                                    ? 0.0D
++                                    : (100.0D * (double) movedAvoidedChecks
++                                            / (double) entityTrackerMovedPlayerEntryChecks);
++
++                    sender.sendMessage(ChatColor.GRAY + "Moved reverse checks: "
++                            + ChatColor.YELLOW
++                            + entityTrackerMovedReverseChecks
++                            + ChatColor.GRAY + " | loaded chunks scanned: "
++                            + ChatColor.YELLOW
++                            + entityTrackerMovedLoadedChunkScans
++                            + ChatColor.GRAY + " | local entity checks: "
++                            + ChatColor.GREEN
++                            + entityTrackerMovedLocalEntityChecks);
++
++                    sender.sendMessage(ChatColor.GRAY + "Moved candidate updates: "
++                            + ChatColor.YELLOW
++                            + entityTrackerMovedCandidateUpdates
++                            + ChatColor.GRAY + " | adaptive global checks: "
++                            + ChatColor.YELLOW
++                            + entityTrackerMovedGlobalFallbackChecks
++                            + ChatColor.GRAY + " | estimated checks avoided: "
++                            + ChatColor.GREEN
++                            + movedAvoidedChecks
++                            + ChatColor.GRAY + " ("
++                            + ChatColor.GREEN
++                            + formatDouble(movedReduction)
++                            + "%"
++                            + ChatColor.GRAY
++                            + ")");
+                 }
+ 
+                 if (entityTrackerChunkRefreshes > 0L) {
+@@ -1222,6 +1285,11 @@ public final class KhopePerformanceDiagnostics {
+         entityTrackerChunkLocalEntityChecks = 0L;
+         entityTrackerChunkTrackedCandidates = 0L;
+ 
++        entityTrackerMovedReverseChecks = 0L;
++        entityTrackerMovedLoadedChunkScans = 0L;
++        entityTrackerMovedLocalEntityChecks = 0L;
++        entityTrackerMovedCandidateUpdates = 0L;
++        entityTrackerMovedGlobalFallbackChecks = 0L;
+         jobTraceActive = false;
+         currentJobCommand = "-";
+         currentJobCommandNanos = 0L;
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 5941d089a..1f97728d2 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -35,6 +35,10 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+     public double e;
+     public final List<ChunkCoordIntPair> chunkCoordIntPairQueue = Lists.newLinkedList();
+     public final java.util.Deque<Integer> removeQueue = new java.util.ArrayDeque<>(); // PandaSpigot
++    // KHopeSpigot - 0163 reverse EntityTracker visibility index. Main-thread
++    // only; maintained by EntityTrackerEntry alongside trackedPlayerMap.
++    public final HashSet<EntityTrackerEntry> khopeTrackedEntries =
++            new HashSet<EntityTrackerEntry>();
+     private final ServerStatisticManager bK;
+     private float bL = Float.MIN_VALUE;
+     private float bM = -1.0E8F;
+diff --git a/src/main/java/net/minecraft/server/EntityTracker.java b/src/main/java/net/minecraft/server/EntityTracker.java
+index 1c4f496ad..b9df41933 100644
+--- a/src/main/java/net/minecraft/server/EntityTracker.java
++++ b/src/main/java/net/minecraft/server/EntityTracker.java
+@@ -23,6 +23,10 @@ public class EntityTracker {
+     private final ArrayList<EntityPlayer> khopeMovedPlayers =
+             new ArrayList<EntityPlayer>();
+ 
++    // KHopeSpigot - 0163 reusable reverse-visibility scratch. Main-thread only.
++    private final ArrayList<EntityTrackerEntry> khopeTrackedEntryScratch =
++            new ArrayList<EntityTrackerEntry>();
++
+     public EntityTracker(WorldServer worldserver) {
+         this.world = worldserver;
+         this.e = worldserver.getMinecraftServer().getPlayerList().d();
+@@ -191,24 +195,161 @@ public class EntityTracker {
+         final int trackerEntryCount = this.c.size();
+         final int movedPlayerCount = movedPlayers.size();
+ 
++        final boolean captureScaling =
++                KhopePerformanceDiagnostics.isJobsEnabledForCurrentTick();
++
+         for (int i = 0; i < movedPlayerCount; ++i) {
+-            EntityPlayer entityplayer = movedPlayers.get(i);
+-            Iterator iterator1 = this.c.iterator();
++            this.updateMovedPlayer(movedPlayers.get(i), captureScaling);
++        }
++
++        if (captureScaling) {
++            KhopePerformanceDiagnostics.recordEntityTrackerTick(
++                    trackerEntryCount, movedPlayerCount);
++        }
++    }
++
++    // KHopeSpigot start - 0163 scale moved-player tracking with visible
++    // relations/chunks instead of scanning every EntityTrackerEntry.
++    private void updateMovedPlayer(EntityPlayer entityplayer, boolean captureScaling) {
++        final ArrayList<EntityTrackerEntry> trackedScratch =
++                this.khopeTrackedEntryScratch;
++        trackedScratch.clear();
++        trackedScratch.addAll(entityplayer.khopeTrackedEntries);
++
++        final int reverseChecks = trackedScratch.size();
++        final int viewDistance = Math.max(0, entityplayer.viewDistance);
++        final long diameter = (long) viewDistance * 2L + 1L;
++        final long spatialBaseline = (long) reverseChecks + diameter * diameter;
++
++        // On small worlds a full tracker scan can be cheaper than hundreds of
++        // chunk hash lookups. Keep the vanilla-style path adaptively until the
++        // global tracker set is clearly larger than the spatial working set.
++        if ((long) this.c.size() <= spatialBaseline * 2L) {
++            int globalChecks = 0;
++            Iterator<EntityTrackerEntry> iterator = this.c.iterator();
+ 
+-            while (iterator1.hasNext()) {
+-                EntityTrackerEntry entitytrackerentry1 = (EntityTrackerEntry) iterator1.next();
++            while (iterator.hasNext()) {
++                final EntityTrackerEntry entitytrackerentry = iterator.next();
+ 
+-                if (entitytrackerentry1.tracker != entityplayer) {
+-                    entitytrackerentry1.updatePlayer(entityplayer);
++                if (entitytrackerentry.tracker != entityplayer) {
++                    if (captureScaling) {
++                        ++globalChecks;
++                    }
++                    entitytrackerentry.updatePlayer(entityplayer);
+                 }
+             }
++
++            if (captureScaling) {
++                KhopePerformanceDiagnostics.recordEntityTrackerMovedPlayerRefresh(
++                        0,
++                        0,
++                        0,
++                        0,
++                        globalChecks);
++            }
++
++            trackedScratch.clear();
++            return;
+         }
+ 
+-        if (KhopePerformanceDiagnostics.isJobsEnabledForCurrentTick()) {
+-            KhopePerformanceDiagnostics.recordEntityTrackerTick(
+-                    trackerEntryCount, movedPlayerCount);
++        // Existing relations must still be revisited so updatePlayer() can
++        // remove entities that left their tracking range. The scratch list is
++        // required because updatePlayer() may remove from khopeTrackedEntries.
++        for (int i = 0; i < reverseChecks; ++i) {
++            final EntityTrackerEntry entitytrackerentry = trackedScratch.get(i);
++
++            if (this.trackedEntities.get(entitytrackerentry.tracker.getId())
++                            != entitytrackerentry
++                    || !entitytrackerentry.trackedPlayers.contains(entityplayer)) {
++                entityplayer.khopeTrackedEntries.remove(entitytrackerentry);
++                continue;
++            }
++
++            entitytrackerentry.updatePlayer(entityplayer);
+         }
++
++        int loadedChunkScans = 0;
++        int localEntityChecks = 0;
++        int candidateUpdates = 0;
++
++        final int centerX = entityplayer.ae;
++        final int centerZ = entityplayer.ag;
++
++        for (int chunkX = centerX - viewDistance;
++                chunkX <= centerX + viewDistance;
++                ++chunkX) {
++            for (int chunkZ = centerZ - viewDistance;
++                    chunkZ <= centerZ + viewDistance;
++                    ++chunkZ) {
++                final Chunk chunk =
++                        this.world.chunkProviderServer.getChunkIfLoaded(chunkX, chunkZ);
++
++                if (chunk == null) {
++                    continue;
++                }
++
++                if (captureScaling) {
++                    ++loadedChunkScans;
++                }
++
++                final List<Entity>[] entitySlices = chunk.entitySlices;
++
++                for (int sliceIndex = 0; sliceIndex < entitySlices.length; ++sliceIndex) {
++                    final List<Entity> entities = entitySlices[sliceIndex];
++                    final int entityCount = entities.size();
++
++                    if (captureScaling) {
++                        localEntityChecks += entityCount;
++                    }
++
++                    for (int entityIndex = 0; entityIndex < entityCount; ++entityIndex) {
++                        final Entity entity = entities.get(entityIndex);
++
++                        if (entity == entityplayer) {
++                            continue;
++                        }
++
++                        final EntityTrackerEntry entitytrackerentry =
++                                this.trackedEntities.get(entity.getId());
++
++                        if (entitytrackerentry == null
++                                || entitytrackerentry.tracker != entity
++                                || entitytrackerentry.tracker.ae != chunkX
++                                || entitytrackerentry.tracker.ag != chunkZ) {
++                            continue;
++                        }
++
++                        if (entitytrackerentry.trackedPlayers.contains(entityplayer)) {
++                            // Self-heal the reverse index if external NMS code
++                            // touched trackedPlayerMap directly.
++                            entityplayer.khopeTrackedEntries.add(entitytrackerentry);
++                            continue;
++                        }
++
++                        if (captureScaling) {
++                            ++candidateUpdates;
++                        }
++
++                        // updatePlayer() retains the exact range, chunk-send
++                        // and vanish checks from the original global scan.
++                        entitytrackerentry.updatePlayer(entityplayer);
++                    }
++                }
++            }
++        }
++
++        if (captureScaling) {
++            KhopePerformanceDiagnostics.recordEntityTrackerMovedPlayerRefresh(
++                    reverseChecks,
++                    loadedChunkScans,
++                    localEntityChecks,
++                    candidateUpdates,
++                    0);
++        }
++
++        trackedScratch.clear();
+     }
++    // KHopeSpigot end
+ 
+     public void a(EntityPlayer entityplayer) {
+         Iterator iterator = this.c.iterator();
+diff --git a/src/main/java/net/minecraft/server/EntityTrackerEntry.java b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+index 8dbe97f07..cc3546509 100644
+--- a/src/main/java/net/minecraft/server/EntityTrackerEntry.java
++++ b/src/main/java/net/minecraft/server/EntityTrackerEntry.java
+@@ -321,6 +321,7 @@ public class EntityTrackerEntry {
+             EntityPlayer entityplayer = (EntityPlayer) iterator.next();
+ 
+             entityplayer.d(this.tracker);
++            entityplayer.khopeTrackedEntries.remove(this);
+         }
+ 
+     }
+@@ -329,6 +330,7 @@ public class EntityTrackerEntry {
+         if (this.trackedPlayers.contains(entityplayer)) {
+             entityplayer.d(this.tracker);
+             this.trackedPlayers.remove(entityplayer);
++            entityplayer.khopeTrackedEntries.remove(this);
+         }
+ 
+     }
+@@ -349,6 +351,7 @@ public class EntityTrackerEntry {
+                     entityplayer.removeQueue.remove(Integer.valueOf(this.tracker.getId()));
+                     // CraftBukkit end
+                     this.trackedPlayerMap.put(entityplayer, true); // PaperBukkit
++                    entityplayer.khopeTrackedEntries.add(this); // KHopeSpigot - 0163 reverse visibility index
+                     Packet packet = this.c();
+ 
+                     entityplayer.playerConnection.sendPacket(packet);
+@@ -428,6 +431,7 @@ public class EntityTrackerEntry {
+                 }
+             } else if (this.trackedPlayers.remove(entityplayer)) {
+                 // KHopeSpigot - 0162 avoid contains()+remove() double hash lookup
++                entityplayer.khopeTrackedEntries.remove(this); // KHopeSpigot - 0163
+                 entityplayer.d(this.tracker);
+             }
+ 
+@@ -568,6 +572,7 @@ public class EntityTrackerEntry {
+         org.spigotmc.AsyncCatcher.catchOp( "player tracker clear"); // Spigot
+         if (this.trackedPlayers.remove(entityplayer)) {
+             // KHopeSpigot - 0162 avoid contains()+remove() double hash lookup
++            entityplayer.khopeTrackedEntries.remove(this); // KHopeSpigot - 0163
+             entityplayer.d(this.tracker);
+         }
+ 
+-- 
+2.51.0.windows.1
+
