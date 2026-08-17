@@ -1,0 +1,292 @@
+From 383d07b2b12a50311a09c2f2004df367fbf4d8ea Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 10:38:49 +0200
+Subject: [PATCH] KHopeSpigot: optimize world and backpressure hot paths
+
+---
+ .../minecraft/server/ChunkProviderServer.java | 46 +++++++++----------
+ .../net/minecraft/server/EntityTracker.java   | 17 ++++---
+ .../net/minecraft/server/PlayerChunkMap.java  | 37 +++++++++------
+ .../net/minecraft/server/WorldServer.java     | 18 ++++++--
+ 4 files changed, 73 insertions(+), 45 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index f1820e277..eaf3158a5 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -5,10 +5,8 @@ import java.io.IOException;
+ import java.util.ArrayDeque;
+ import java.util.ArrayList;
+ import java.util.Collections;
+-import java.util.HashMap;
+ import java.util.Iterator;
+ import java.util.List;
+-import java.util.Map;
+ import java.util.Queue;
+ import java.util.Set;
+ import java.util.concurrent.ConcurrentHashMap;
+@@ -54,14 +52,14 @@ public class ChunkProviderServer implements IChunkProvider {
+     // bounded amount is generated each world tick.
+     private final Queue<KhopePendingChunkGeneration> khopePendingChunkGenerations =
+             new ArrayDeque<KhopePendingChunkGeneration>();
+-    private final Map<Long, KhopePendingChunkGeneration> khopePendingChunkGenerationByKey =
+-            new HashMap<Long, KhopePendingChunkGeneration>();
++    private final LongObjectHashMap<KhopePendingChunkGeneration> khopePendingChunkGenerationByKey =
++            new LongObjectHashMap<KhopePendingChunkGeneration>();
+ 
+     private static final class KhopePendingChunkGeneration {
+         private final long key;
+         private final int x;
+         private final int z;
+-        private final long queuedNanos = System.nanoTime();
++        private final int queuedTick = MinecraftServer.currentTick;
+         private final List<Runnable> callbacks = new ArrayList<Runnable>(2);
+         private boolean cancelled;
+ 
+@@ -229,11 +227,10 @@ public class ChunkProviderServer implements IChunkProvider {
+             return;
+         }
+ 
+-        final Long boxedKey = Long.valueOf(key);
+-        KhopePendingChunkGeneration pending = this.khopePendingChunkGenerationByKey.get(boxedKey);
++        KhopePendingChunkGeneration pending = this.khopePendingChunkGenerationByKey.get(key);
+         if (pending == null) {
+             pending = new KhopePendingChunkGeneration(key, x, z);
+-            this.khopePendingChunkGenerationByKey.put(boxedKey, pending);
++            this.khopePendingChunkGenerationByKey.put(key, pending);
+             this.khopePendingChunkGenerations.add(pending);
+         }
+ 
+@@ -247,7 +244,7 @@ public class ChunkProviderServer implements IChunkProvider {
+             return;
+         }
+ 
+-        final Long key = Long.valueOf(LongHash.toLong(x, z));
++        final long key = LongHash.toLong(x, z);
+         final KhopePendingChunkGeneration pending = this.khopePendingChunkGenerationByKey.get(key);
+         if (pending == null) {
+             return;
+@@ -287,7 +284,7 @@ public class ChunkProviderServer implements IChunkProvider {
+             // Discard stale/cancelled queue nodes in O(1) from the head.
+             while (pending != null
+                     && (pending.cancelled
+-                    || this.khopePendingChunkGenerationByKey.get(Long.valueOf(pending.key)) != pending)) {
++                    || this.khopePendingChunkGenerationByKey.get(pending.key) != pending)) {
+                 this.khopePendingChunkGenerations.poll();
+                 pending = this.khopePendingChunkGenerations.peek();
+             }
+@@ -311,7 +308,7 @@ public class ChunkProviderServer implements IChunkProvider {
+             }
+ 
+             this.khopePendingChunkGenerations.poll();
+-            this.khopePendingChunkGenerationByKey.remove(Long.valueOf(pending.key));
++            this.khopePendingChunkGenerationByKey.remove(pending.key);
+ 
+             // Another path may have loaded/generated the chunk while this
+             // request was waiting. In that case only complete the callbacks.
+@@ -332,24 +329,27 @@ public class ChunkProviderServer implements IChunkProvider {
+             }
+         }
+ 
+-        final KhopePendingChunkGeneration oldest = this.peekKhopePendingChunkGeneration();
+-        final long oldestAgeNanos = oldest == null
+-                ? 0L
+-                : Math.max(0L, System.nanoTime() - oldest.queuedNanos);
+-
+-        com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordDeferredChunkGenerationBudget(
+-                generated,
+-                this.khopePendingChunkGenerationByKey.size(),
+-                System.nanoTime() - startNanos,
+-                budgetHit,
+-                oldestAgeNanos);
++        if (com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.isSlowPathCaptureEnabled()) {
++            final KhopePendingChunkGeneration oldest = this.peekKhopePendingChunkGeneration();
++            final long oldestAgeTicks = oldest == null
++                    ? 0L
++                    : Math.max(0L, (long) MinecraftServer.currentTick - (long) oldest.queuedTick);
++            final long oldestAgeNanos = oldestAgeTicks * 50_000_000L;
++
++            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordDeferredChunkGenerationBudget(
++                    generated,
++                    this.khopePendingChunkGenerationByKey.size(),
++                    System.nanoTime() - startNanos,
++                    budgetHit,
++                    oldestAgeNanos);
++        }
+     }
+ 
+     private KhopePendingChunkGeneration peekKhopePendingChunkGeneration() {
+         KhopePendingChunkGeneration pending = this.khopePendingChunkGenerations.peek();
+         while (pending != null
+                 && (pending.cancelled
+-                || this.khopePendingChunkGenerationByKey.get(Long.valueOf(pending.key)) != pending)) {
++                || this.khopePendingChunkGenerationByKey.get(pending.key) != pending)) {
+             this.khopePendingChunkGenerations.poll();
+             pending = this.khopePendingChunkGenerations.peek();
+         }
+diff --git a/src/main/java/net/minecraft/server/EntityTracker.java b/src/main/java/net/minecraft/server/EntityTracker.java
+index cb72b3672..d36796862 100644
+--- a/src/main/java/net/minecraft/server/EntityTracker.java
++++ b/src/main/java/net/minecraft/server/EntityTracker.java
+@@ -1,6 +1,5 @@
+ package net.minecraft.server;
+ 
+-import com.google.common.collect.Lists;
+ import com.google.common.collect.Sets;
+ import java.util.ArrayList;
+ import java.util.Iterator;
+@@ -17,6 +16,11 @@ public class EntityTracker {
+     public IntHashMap<EntityTrackerEntry> trackedEntities = new IntHashMap();
+     private int e;
+ 
++    // KHopeSpigot - 0154: reusable main-thread scratch buffer. The vanilla /
++    // CraftBukkit path allocated a fresh ArrayList every tracker tick.
++    private final ArrayList<EntityPlayer> khopeMovedPlayers =
++            new ArrayList<EntityPlayer>();
++
+     public EntityTracker(WorldServer worldserver) {
+         this.world = worldserver;
+         this.e = worldserver.getMinecraftServer().getPlayerList().d();
+@@ -168,7 +172,9 @@ public class EntityTracker {
+     }
+ 
+     public void updatePlayers() {
+-        ArrayList arraylist = Lists.newArrayList();
++        final ArrayList<EntityPlayer> movedPlayers = this.khopeMovedPlayers;
++        movedPlayers.clear();
++
+         Iterator iterator = this.c.iterator();
+ 
+         while (iterator.hasNext()) {
+@@ -176,12 +182,12 @@ public class EntityTracker {
+ 
+             entitytrackerentry.track(this.world.players);
+             if (entitytrackerentry.n && entitytrackerentry.tracker instanceof EntityPlayer) {
+-                arraylist.add((EntityPlayer) entitytrackerentry.tracker);
++                movedPlayers.add((EntityPlayer) entitytrackerentry.tracker);
+             }
+         }
+ 
+-        for (int i = 0; i < arraylist.size(); ++i) {
+-            EntityPlayer entityplayer = (EntityPlayer) arraylist.get(i);
++        for (int i = 0, size = movedPlayers.size(); i < size; ++i) {
++            EntityPlayer entityplayer = movedPlayers.get(i);
+             Iterator iterator1 = this.c.iterator();
+ 
+             while (iterator1.hasNext()) {
+@@ -192,7 +198,6 @@ public class EntityTracker {
+                 }
+             }
+         }
+-
+     }
+ 
+     public void a(EntityPlayer entityplayer) {
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index 07a24b49d..e076b9c49 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -234,15 +234,24 @@ public class PlayerChunkMap {
+                 continue;
+             }
+ 
++            final int centerX = (int) player.locX >> 4;
++            final int centerZ = (int) player.locZ >> 4;
++            final int viewDistance = player.viewDistance;
++
+             int playerProcessed = 0;
+             while (processed < maxPerTick && playerProcessed < quantum && !pending.isEmpty()) {
+                 final ChunkCoordIntPair pair = pending.poll();
+ 
+-                final int centerX = (int) player.locX >> 4;
+-                final int centerZ = (int) player.locZ >> 4;
+-                if (this.a(pair.x, pair.z, centerX, centerZ, player.viewDistance)
+-                        && !this.isKhopePlayerSubscribed(player, pair.x, pair.z)) {
+-                    this.a(pair.x, pair.z, true).a(player);
++                if (this.a(pair.x, pair.z, centerX, centerZ, viewDistance)) {
++                    PlayerChunk playerChunk = this.a(pair.x, pair.z, false);
++
++                    if (playerChunk == null) {
++                        playerChunk = this.a(pair.x, pair.z, true);
++                    }
++
++                    if (!playerChunk.b.contains(player)) {
++                        playerChunk.a(player);
++                    }
+                 }
+ 
+                 ++processed;
+@@ -263,15 +272,17 @@ public class PlayerChunkMap {
+             }
+         }
+ 
+-        int totalPending = 0;
+-        for (ArrayDeque<ChunkCoordIntPair> queue : this.khopePendingChunksByPlayer.values()) {
+-            totalPending += queue.size();
+-        }
++        if (com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.isSlowPathCaptureEnabled()) {
++            int totalPending = 0;
++            for (ArrayDeque<ChunkCoordIntPair> queue : this.khopePendingChunksByPlayer.values()) {
++                totalPending += queue.size();
++            }
+ 
+-        com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordPlayerChunkSubscriptionBudget(
+-                processed,
+-                this.khopeQueuedPlayers.size(),
+-                totalPending);
++            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordPlayerChunkSubscriptionBudget(
++                    processed,
++                    this.khopeQueuedPlayers.size(),
++                    totalPending);
++        }
+     }
+     // KHopeSpigot end
+ 
+diff --git a/src/main/java/net/minecraft/server/WorldServer.java b/src/main/java/net/minecraft/server/WorldServer.java
+index 864b63f20..e95f93341 100644
+--- a/src/main/java/net/minecraft/server/WorldServer.java
++++ b/src/main/java/net/minecraft/server/WorldServer.java
+@@ -396,25 +396,37 @@ public class WorldServer extends World implements IAsyncTaskHandler {
+             //    int k = chunkcoordintpair1.x * 16;
+             //    int l = chunkcoordintpair1.z * 16;
+             // Spigot start
++            // KHopeSpigot start - 0154 world tick loaded-chunk fast path
++            //
++            // The old path performed one lookup through isChunkLoaded() and
++            // then another through getChunkAt(), which also touched the unload
++            // queue. chunkTickList only needs chunks that are already loaded,
++            // so reuse one direct ChunkProviderServer lookup instead.
++            final ChunkProviderServer khopeChunkProvider = this.chunkProviderServer;
++
+             for (gnu.trove.iterator.TLongShortIterator iter = chunkTickList.iterator(); iter.hasNext(); )
+             {
+                 iter.advance();
+                 long chunkCoord = iter.key();
+                 int chunkX = World.keyToX( chunkCoord );
+                 int chunkZ = World.keyToZ( chunkCoord );
+-                // If unloaded, or in procedd of being unloaded, drop it
+-                if ( ( !this.chunkProvider.isChunkLoaded( chunkX, chunkZ ) ) || ( this.chunkProviderServer.unloadQueue.contains( chunkX, chunkZ ) ) )
++
++                Chunk chunk = khopeChunkProvider.getChunkIfLoaded(chunkX, chunkZ);
++
++                // If unloaded, or in process of being unloaded, drop it.
++                if (chunk == null || khopeChunkProvider.unloadQueue.contains(chunkX, chunkZ))
+                 {
+                     iter.remove();
+                     continue;
+                 }
++
+                 // Spigot end
+                 // ChunkCoordIntPair chunkcoordintpair = (ChunkCoordIntPair) iterator.next();
+                 int k = chunkX * 16;
+                 int l = chunkZ * 16;
+ 
+                 this.methodProfiler.a("getChunk");
+-                Chunk chunk = this.getChunkAt(chunkX, chunkZ);
++                // KHopeSpigot end
+                 // CraftBukkit end
+ 
+                 this.a(k, l, chunk);
+-- 
+2.51.0.windows.1
+
