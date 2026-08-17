@@ -1,0 +1,309 @@
+From 9adc49aa67e602605f8903d61847b27a9cf597bb Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 11:24:38 +0200
+Subject: [PATCH] KHopeSpigot: optimize inactive entity hot paths
+
+---
+ src/main/java/net/minecraft/server/World.java | 78 +++++++++++++------
+ .../java/org/spigotmc/ActivationRange.java    | 61 +++++++++------
+ 2 files changed, 95 insertions(+), 44 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index 9b86cdd3b..a9d22c9bd 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -66,6 +66,14 @@ public abstract class World implements IBlockAccess {
+     public final List<TileEntity> tileEntityList = Lists.newArrayList();
+     private final List<TileEntity> b = Lists.newArrayList();
+     private final Set<TileEntity> c = Sets.newHashSet(); // Paper
++
++    // KHopeSpigot start - 0156 WorldEntities hot paths
++    // Primary-thread scratch set. Preserve PandaSpigot's identity-based
++    // removal semantics without allocating a new IdentityHashMap-backed set.
++    private final Set<TileEntity> khopeTileEntityRemovalSet =
++            Collections.newSetFromMap(new IdentityHashMap<TileEntity, Boolean>());
++    // KHopeSpigot end
++
+     public final List<EntityHuman> players = Lists.newArrayList();
+     public final List<Entity> k = Lists.newArrayList();
+     protected final IntHashMap<Entity> entitiesById = new IntHashMap();
+@@ -1538,8 +1546,11 @@ public abstract class World implements IBlockAccess {
+         for (Entity e : this.g) {
+             j = e.ae;
+             k = e.ag;
+-            if (e.ad && this.isChunkLoaded(j, k, true)) {
+-                this.getChunkAt(j, k).b(e);
++            if (e.ad) {
++                final Chunk loadedChunk = this.getChunkIfLoaded(j, k);
++                if (loadedChunk != null) {
++                    loadedChunk.b(e);
++                }
+             }
+         }
+ 
+@@ -1598,8 +1609,11 @@ public abstract class World implements IBlockAccess {
+             if (entity.dead) {
+                 j = entity.ae;
+                 k = entity.ag;
+-                if (entity.ad && this.isChunkLoaded(j, k, true)) {
+-                    this.getChunkAt(j, k).b(entity);
++                if (entity.ad) {
++                    final Chunk loadedChunk = this.getChunkIfLoaded(j, k);
++                    if (loadedChunk != null) {
++                        loadedChunk.b(entity);
++                    }
+                 }
+ 
+                 guardEntityList = false; // Spigot
+@@ -1618,11 +1632,13 @@ public abstract class World implements IBlockAccess {
+         this.M = true;
+         // CraftBukkit start - From below, clean up tile entities before ticking them
+         if (!this.c.isEmpty()) {
+-            // PandaSpigot start - Use alternate implementation with faster contains
+-            java.util.Set<TileEntity> toRemove = java.util.Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+-            toRemove.addAll(c);
++            // KHopeSpigot start - 0156 reuse identity removal scratch set
++            final Set<TileEntity> toRemove = this.khopeTileEntityRemovalSet;
++            toRemove.clear();
++            toRemove.addAll(this.c);
+             this.tileEntityList.removeAll(toRemove);
+-            // PandaSpigot end
++            toRemove.clear();
++            // KHopeSpigot end
+             //this.h.removeAll(this.c); // PaperSpigot - Remove unused list
+             this.c.clear();
+         }
+@@ -1673,8 +1689,10 @@ public abstract class World implements IBlockAccess {
+                 // tilesThisCycle--; // PandaSpigot - Remove unused code
+                 this.tileEntityList.remove(tileTickPosition--);
+                 //this.h.remove(tileentity); // PaperSpigot - Remove unused list
+-                if (this.isLoaded(tileentity.getPosition())) {
+-                    this.getChunkAtWorldCoords(tileentity.getPosition()).e(tileentity.getPosition());
++                final BlockPosition tilePosition = tileentity.getPosition();
++                final Chunk loadedChunk = this.getChunkIfLoaded(tilePosition);
++                if (loadedChunk != null) {
++                    loadedChunk.e(tilePosition);
+                 }
+             }
+         }
+@@ -1702,8 +1720,10 @@ public abstract class World implements IBlockAccess {
+                     }
+                     // CraftBukkit end */
+ 
+-                    if (this.isLoaded(tileentity1.getPosition())) {
+-                        this.getChunkAtWorldCoords(tileentity1.getPosition()).a(tileentity1.getPosition(), tileentity1);
++                    final BlockPosition tilePosition = tileentity1.getPosition();
++                    final Chunk loadedChunk = this.getChunkIfLoaded(tilePosition);
++                    if (loadedChunk != null) {
++                        loadedChunk.a(tilePosition, tileentity1);
+                     }
+ 
+                     this.notify(tileentity1.getPosition());
+@@ -1753,20 +1773,29 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public void entityJoinedWorld(Entity entity, boolean flag) {
+-        int i = MathHelper.floor(entity.locX);
+-        int j = MathHelper.floor(entity.locZ);
+         byte b0 = 32;
+ 
+         // Spigot start
+         if (!org.spigotmc.ActivationRange.checkIfActive(entity)) {
+             entity.ticksLived++;
+             entity.inactiveTick();
++
+             // PaperSpigot start - Remove entities in unloaded chunks
+-            if (!this.isChunkLoaded(i, j, true) && ((entity instanceof EntityEnderPearl && this.paperSpigotConfig.removeUnloadedEnderPearls) ||
++            // KHopeSpigot 0156 - Ordinary inactive mobs do not need a coordinate
++            // conversion or chunk query here.
++            final boolean removeIfUnloaded =
++                    (entity instanceof EntityEnderPearl && this.paperSpigotConfig.removeUnloadedEnderPearls) ||
+                     (entity instanceof EntityFallingBlock && this.paperSpigotConfig.removeUnloadedFallingBlocks) ||
+-                    (entity instanceof EntityTNTPrimed && this.paperSpigotConfig.removeUnloadedTNTEntities))) {
+-                entity.inUnloadedChunk = true;
+-                entity.die();
++                    (entity instanceof EntityTNTPrimed && this.paperSpigotConfig.removeUnloadedTNTEntities);
++
++            if (removeIfUnloaded) {
++                final int i = MathHelper.floor(entity.locX);
++                final int j = MathHelper.floor(entity.locZ);
++
++                if (!this.isChunkLoaded(i, j, true)) {
++                    entity.inUnloadedChunk = true;
++                    entity.die();
++                }
+             }
+             // PaperSpigot end
+         } else {
+@@ -1813,13 +1842,18 @@ public abstract class World implements IBlockAccess {
+ 
+             if (!entity.ad || entity.ae != k || entity.af != l || entity.ag != i1) {
+                 if (entity.loadChunks) entity.loadChunks(); // PaperSpigot - Force load chunks
+-                if (entity.ad && this.isChunkLoaded(entity.ae, entity.ag, true)) {
+-                    this.getChunkAt(entity.ae, entity.ag).a(entity, entity.af);
++
++                if (entity.ad) {
++                    final Chunk previousChunk = this.getChunkIfLoaded(entity.ae, entity.ag);
++                    if (previousChunk != null) {
++                        previousChunk.a(entity, entity.af);
++                    }
+                 }
+ 
+-                if (this.isChunkLoaded(k, i1, true)) {
++                final Chunk destinationChunk = this.getChunkIfLoaded(k, i1);
++                if (destinationChunk != null) {
+                     entity.ad = true;
+-                    this.getChunkAt(k, i1).a(entity);
++                    destinationChunk.a(entity);
+                 } else {
+                     entity.ad = false;
+                 }
+diff --git a/src/main/java/org/spigotmc/ActivationRange.java b/src/main/java/org/spigotmc/ActivationRange.java
+index 90b723856..0ecb16dfe 100644
+--- a/src/main/java/org/spigotmc/ActivationRange.java
++++ b/src/main/java/org/spigotmc/ActivationRange.java
+@@ -110,14 +110,17 @@ public class ActivationRange
+         maxRange = Math.max( maxRange, miscActivationRange );
+         maxRange = Math.min( ( world.spigotConfig.viewDistance << 4 ) - 8, maxRange );
+ 
++        final int currentTick = MinecraftServer.currentTick;
++
+         for ( Entity player : (List<Entity>) (List) world.players )
+         {
++            player.activatedTick = currentTick;
+ 
+-            player.activatedTick = MinecraftServer.currentTick;
+-            maxBB = player.getBoundingBox().grow( maxRange, 256, maxRange );
+-            miscBB = player.getBoundingBox().grow( miscActivationRange, 256, miscActivationRange );
+-            animalBB = player.getBoundingBox().grow( animalActivationRange, 256, animalActivationRange );
+-            monsterBB = player.getBoundingBox().grow( monsterActivationRange, 256, monsterActivationRange );
++            final AxisAlignedBB playerBB = player.getBoundingBox();
++            maxBB = playerBB.grow( maxRange, 256, maxRange );
++            miscBB = playerBB.grow( miscActivationRange, 256, miscActivationRange );
++            animalBB = playerBB.grow( animalActivationRange, 256, animalActivationRange );
++            monsterBB = playerBB.grow( monsterActivationRange, 256, monsterActivationRange );
+ 
+             int i = MathHelper.floor( maxBB.a / 16.0D );
+             int j = MathHelper.floor( maxBB.d / 16.0D );
+@@ -132,7 +135,7 @@ public class ActivationRange
+                     Chunk chunk = world.getChunkIfLoaded( i1, j1 );
+                     if ( chunk != null )
+                     {
+-                        activateChunkEntities( chunk );
++                        activateChunkEntities( chunk, currentTick );
+                     // PandaSpigot end
+                     }
+                 }
+@@ -146,17 +149,17 @@ public class ActivationRange
+      *
+      * @param chunk
+      */
+-    private static void activateChunkEntities(Chunk chunk)
++    private static void activateChunkEntities(Chunk chunk, int currentTick)
+     {
+         for ( List<Entity> slice : chunk.entitySlices )
+         {
+             for ( Entity entity : slice )
+             {
+-                if ( MinecraftServer.currentTick > entity.activatedTick )
++                if ( currentTick > entity.activatedTick )
+                 {
+                     if ( entity.defaultActivationState )
+                     {
+-                        entity.activatedTick = MinecraftServer.currentTick;
++                        entity.activatedTick = currentTick;
+                         continue;
+                     }
+                     switch ( entity.activationType )
+@@ -164,20 +167,20 @@ public class ActivationRange
+                         case 1:
+                             if ( monsterBB.b( entity.getBoundingBox() ) )
+                             {
+-                                entity.activatedTick = MinecraftServer.currentTick;
++                                entity.activatedTick = currentTick;
+                             }
+                             break;
+                         case 2:
+                             if ( animalBB.b( entity.getBoundingBox() ) )
+                             {
+-                                entity.activatedTick = MinecraftServer.currentTick;
++                                entity.activatedTick = currentTick;
+                             }
+                             break;
+                         case 3:
+                         default:
+                             if ( miscBB.b( entity.getBoundingBox() ) )
+                             {
+-                                entity.activatedTick = MinecraftServer.currentTick;
++                                entity.activatedTick = currentTick;
+                             }
+                     }
+                 }
+@@ -254,24 +257,26 @@ public class ActivationRange
+     public static boolean checkIfActive(Entity entity)
+     {
+         SpigotTimings.checkIfActiveTimer.startTiming();
++
+         // Never safe to skip fireworks or entities not yet added to chunk
+         if ( !entity.isAddedToChunk() || entity instanceof EntityFireworks || entity.loadChunks ) { // PaperSpigot
+             SpigotTimings.checkIfActiveTimer.stopTiming();
+             return true;
+         }
+ 
+-        boolean isActive = entity.activatedTick >= MinecraftServer.currentTick || entity.defaultActivationState;
++        final int currentTick = MinecraftServer.currentTick;
++        boolean isActive = entity.activatedTick >= currentTick || entity.defaultActivationState;
+ 
+         // Should this entity tick?
+         if ( !isActive )
+         {
+-            if ( ( MinecraftServer.currentTick - entity.activatedTick - 1 ) % 20 == 0 )
++            if ( ( currentTick - entity.activatedTick - 1 ) % 20 == 0 )
+             {
+                 // Check immunities every 20 ticks.
+                 if ( checkEntityImmunities( entity ) )
+                 {
+                     // Triggered some sort of immunity, give 20 full ticks before we check again.
+-                    entity.activatedTick = MinecraftServer.currentTick + 20;
++                    entity.activatedTick = currentTick + 20;
+                 }
+                 isActive = true;
+             }
+@@ -280,15 +285,27 @@ public class ActivationRange
+         {
+             isActive = false;
+         }
+-        int x = MathHelper.floor( entity.locX );
+-        int z = MathHelper.floor( entity.locZ );
+-        // Make sure not on edge of unloaded chunk
+-        Chunk chunk = entity.world.getChunkIfLoaded( x >> 4, z >> 4 );
+-        if ( isActive && !( chunk != null && chunk.areNeighborsLoaded( 1 ) ) )
++
++        // KHopeSpigot - 0156: the old path still floored coordinates and queried
++        // the chunk after activation had already rejected the entity.
++        if ( !isActive )
+         {
+-            isActive = false;
++            SpigotTimings.checkIfActiveTimer.stopTiming();
++            return false;
+         }
++
++        final int x = MathHelper.floor( entity.locX );
++        final int z = MathHelper.floor( entity.locZ );
++
++        // Make sure not on edge of unloaded chunk.
++        final Chunk chunk = entity.world.getChunkIfLoaded( x >> 4, z >> 4 );
++        if ( chunk == null || !chunk.areNeighborsLoaded( 1 ) )
++        {
++            SpigotTimings.checkIfActiveTimer.stopTiming();
++            return false;
++        }
++
+         SpigotTimings.checkIfActiveTimer.stopTiming();
+-        return isActive;
++        return true;
+     }
+ }
+-- 
+2.51.0.windows.1
+
