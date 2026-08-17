@@ -1,0 +1,297 @@
+From c1045caba7eb61c209e9195e9e9e3e753e4240fb Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 14:23:59 +0200
+Subject: [PATCH] KHopeSpigot: optimize player chunk delivery hot paths
+
+---
+ .../minecraft/server/ChunkProviderServer.java | 19 +++++
+ .../net/minecraft/server/EntityPlayer.java    | 56 ++++++++-------
+ .../server/PacketPlayOutMapChunk.java         | 72 ++++++++++---------
+ .../net/minecraft/server/PlayerChunkMap.java  | 18 +++--
+ 4 files changed, 98 insertions(+), 67 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/ChunkProviderServer.java b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+index eaf3158a5..3acb162fe 100644
+--- a/src/main/java/net/minecraft/server/ChunkProviderServer.java
++++ b/src/main/java/net/minecraft/server/ChunkProviderServer.java
+@@ -148,6 +148,25 @@ public class ChunkProviderServer implements IChunkProvider {
+         return chunks.get(LongHash.toLong(x, z));
+     }
+ 
++    // KHopeSpigot start - 0161 loaded player-chunk delivery fast path
++    // EntityPlayer's send queue only wants chunks that are already loaded. The
++    // old path first queried isLoaded() and then called getChunkAt(), performing
++    // a second map lookup. Preserve getChunkAt()'s unload-cancellation and
++    // diagnostics without entering its load/generation machinery.
++    public Chunk getLoadedChunkForPlayerSend(int x, int z) {
++        final Chunk chunk = chunks.get(LongHash.toLong(x, z));
++        if (chunk == null) {
++            return null;
++        }
++
++        unloadQueue.remove(x, z);
++        if (com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.isSlowPathCaptureEnabled()) {
++            com.hpfxd.pandaspigot.util.KhopePerformanceDiagnostics.recordLoadedChunkHit();
++        }
++        return chunk;
++    }
++    // KHopeSpigot end
++
+     public Chunk getChunkAt(int i, int j) {
+         return getChunkAt(i, j, null);
+     }
+diff --git a/src/main/java/net/minecraft/server/EntityPlayer.java b/src/main/java/net/minecraft/server/EntityPlayer.java
+index 52c944a21..5941d089a 100644
+--- a/src/main/java/net/minecraft/server/EntityPlayer.java
++++ b/src/main/java/net/minecraft/server/EntityPlayer.java
+@@ -242,52 +242,58 @@ public class EntityPlayer extends EntityHuman implements ICrafting {
+         }
+ 
+         if (!this.chunkCoordIntPairQueue.isEmpty()) {
+-            ArrayList arraylist = Lists.newArrayList();
++            // KHopeSpigot start - 0161 loaded player-chunk delivery fast paths
++            final int maxBulkChunks = this.world.spigotConfig.maxBulkChunk;
++            final ArrayList<Chunk> chunksToSend =
++                    new ArrayList<Chunk>(Math.max(0, Math.min(this.chunkCoordIntPairQueue.size(), maxBulkChunks)));
+             Iterator iterator1 = this.chunkCoordIntPairQueue.iterator();
+-            ArrayList arraylist1 = Lists.newArrayList();
++            ArrayList<TileEntity> tileEntitiesToSend = null;
+ 
+             Chunk chunk;
+ 
+-            while (iterator1.hasNext() && arraylist.size() < this.world.spigotConfig.maxBulkChunk) { // Spigot
++            while (iterator1.hasNext() && chunksToSend.size() < maxBulkChunks) { // Spigot
+                 ChunkCoordIntPair chunkcoordintpair = (ChunkCoordIntPair) iterator1.next();
+ 
+                 if (chunkcoordintpair != null) {
+-                    if (this.world.isLoaded(new BlockPosition(chunkcoordintpair.x << 4, 0, chunkcoordintpair.z << 4))) {
+-                        chunk = this.world.getChunkAt(chunkcoordintpair.x, chunkcoordintpair.z);
+-                        if (chunk.isReady()) {
+-                            arraylist.add(chunk);
+-                            arraylist1.addAll(chunk.tileEntities.values()); // CraftBukkit - Get tile entities directly from the chunk instead of the world
+-                            iterator1.remove();
+-                            new io.papermc.paper.event.packet.PlayerChunkLoadEvent(chunk.bukkitChunk, this.getBukkitEntity()).callEvent(); // PandaSpigot
++                    chunk = ((WorldServer) this.world).chunkProviderServer.getLoadedChunkForPlayerSend(
++                            chunkcoordintpair.x, chunkcoordintpair.z);
++                    if (chunk != null && chunk.isReady()) {
++                        chunksToSend.add(chunk);
++                        if (!chunk.tileEntities.isEmpty()) {
++                            if (tileEntitiesToSend == null) {
++                                tileEntitiesToSend = new ArrayList<TileEntity>();
++                            }
++                            // CraftBukkit - snapshot before PlayerChunkLoadEvent, matching the old path.
++                            tileEntitiesToSend.addAll(chunk.tileEntities.values());
+                         }
++                        iterator1.remove();
++                        new io.papermc.paper.event.packet.PlayerChunkLoadEvent(chunk.bukkitChunk, this.getBukkitEntity()).callEvent(); // PandaSpigot
+                     }
+                 } else {
+                     iterator1.remove();
+                 }
+             }
+ 
+-            if (!arraylist.isEmpty()) {
+-                if (arraylist.size() == 1) {
+-                    this.playerConnection.sendPacket(new PacketPlayOutMapChunk((Chunk) arraylist.get(0), true, '\uffff'));
++            if (!chunksToSend.isEmpty()) {
++                if (chunksToSend.size() == 1) {
++                    this.playerConnection.sendPacket(
++                            new PacketPlayOutMapChunk(chunksToSend.get(0), true, '\uffff'));
+                 } else {
+-                    this.playerConnection.sendPacket(new PacketPlayOutMapChunkBulk(arraylist));
++                    this.playerConnection.sendPacket(
++                            new PacketPlayOutMapChunkBulk(chunksToSend));
+                 }
+ 
+-                Iterator iterator2 = arraylist1.iterator();
+-
+-                while (iterator2.hasNext()) {
+-                    TileEntity tileentity = (TileEntity) iterator2.next();
+-
+-                    this.a(tileentity);
++                if (tileEntitiesToSend != null) {
++                    for (int tileIndex = 0, tileCount = tileEntitiesToSend.size(); tileIndex < tileCount; ++tileIndex) {
++                        this.a(tileEntitiesToSend.get(tileIndex));
++                    }
+                 }
+ 
+-                iterator2 = arraylist.iterator();
+-
+-                while (iterator2.hasNext()) {
+-                    chunk = (Chunk) iterator2.next();
+-                    this.u().getTracker().a(this, chunk);
++                for (int chunkIndex = 0, chunkCount = chunksToSend.size(); chunkIndex < chunkCount; ++chunkIndex) {
++                    this.u().getTracker().a(this, chunksToSend.get(chunkIndex));
+                 }
+             }
++            // KHopeSpigot end
+         }
+ 
+         Entity entity = this.C();
+diff --git a/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java b/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
+index a0021fb96..e0f4183b3 100644
+--- a/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
++++ b/src/main/java/net/minecraft/server/PacketPlayOutMapChunk.java
+@@ -1,9 +1,6 @@
+ package net.minecraft.server;
+ 
+-import com.google.common.collect.Lists;
+ import java.io.IOException;
+-import java.util.ArrayList;
+-import java.util.Iterator;
+ 
+ public class PacketPlayOutMapChunk implements Packet<PacketListenerPlayOut> {
+ 
+@@ -53,56 +50,67 @@ public class PacketPlayOutMapChunk implements Packet<PacketListenerPlayOut> {
+     }
+ 
+     public static PacketPlayOutMapChunk.ChunkMap a(Chunk chunk, boolean flag, boolean flag1, int i) {
++        // KHopeSpigot start - 0161 chunk packet build fast path
++        // The old path built a temporary ArrayList of selected sections and then
++        // iterated it three times. Chunk sections are a fixed 16-entry array, so
++        // retain the selected bit mask and rescan the tiny array instead. This
++        // removes one allocation (plus iterator objects) from every chunk-map build.
+         ChunkSection[] achunksection = chunk.getSections();
+         PacketPlayOutMapChunk.ChunkMap packetplayoutmapchunk_chunkmap = new PacketPlayOutMapChunk.ChunkMap();
+-        ArrayList arraylist = Lists.newArrayList();
+ 
+-        int j;
+-
+-        for (j = 0; j < achunksection.length; ++j) {
+-            ChunkSection chunksection = achunksection[j];
+-
+-            if (chunksection != null && (!flag || !chunksection.a()) && (i & 1 << j) != 0) {
+-                packetplayoutmapchunk_chunkmap.b |= 1 << j;
+-                arraylist.add(chunksection);
++        for (int sectionIndex = 0; sectionIndex < achunksection.length; ++sectionIndex) {
++            ChunkSection chunksection = achunksection[sectionIndex];
++            if (chunksection != null
++                    && (!flag || !chunksection.a())
++                    && (i & 1 << sectionIndex) != 0) {
++                packetplayoutmapchunk_chunkmap.b |= 1 << sectionIndex;
+             }
+         }
+ 
+-        packetplayoutmapchunk_chunkmap.a = new byte[a(Integer.bitCount(packetplayoutmapchunk_chunkmap.b), flag1, flag)];
+-        j = 0;
+-        Iterator iterator = arraylist.iterator();
+-
+-        ChunkSection chunksection1;
++        final int selectedSections = packetplayoutmapchunk_chunkmap.b;
++        packetplayoutmapchunk_chunkmap.a =
++                new byte[a(Integer.bitCount(selectedSections), flag1, flag)];
++        int offset = 0;
+ 
+-        while (iterator.hasNext()) {
+-            chunksection1 = (ChunkSection) iterator.next();
+-            char[] achar = chunksection1.getIdArray();
+-            char[] achar1 = achar;
+-            int k = achar.length;
+-
+-            for (int l = 0; l < k; ++l) {
+-                char c0 = achar1[l];
++        for (int sectionIndex = 0; sectionIndex < achunksection.length; ++sectionIndex) {
++            if ((selectedSections & 1 << sectionIndex) == 0) {
++                continue;
++            }
+ 
+-                packetplayoutmapchunk_chunkmap.a[j++] = (byte) (c0 & 255);
+-                packetplayoutmapchunk_chunkmap.a[j++] = (byte) (c0 >> 8 & 255);
++            final char[] blockIds = achunksection[sectionIndex].getIdArray();
++            for (int blockIndex = 0; blockIndex < blockIds.length; ++blockIndex) {
++                final char blockId = blockIds[blockIndex];
++                packetplayoutmapchunk_chunkmap.a[offset++] = (byte) (blockId & 255);
++                packetplayoutmapchunk_chunkmap.a[offset++] = (byte) (blockId >> 8 & 255);
+             }
+         }
+ 
+-        for (iterator = arraylist.iterator(); iterator.hasNext(); j = a(chunksection1.getEmittedLightArray().a(), packetplayoutmapchunk_chunkmap.a, j)) {
+-            chunksection1 = (ChunkSection) iterator.next();
++        for (int sectionIndex = 0; sectionIndex < achunksection.length; ++sectionIndex) {
++            if ((selectedSections & 1 << sectionIndex) != 0) {
++                offset = a(
++                        achunksection[sectionIndex].getEmittedLightArray().a(),
++                        packetplayoutmapchunk_chunkmap.a,
++                        offset);
++            }
+         }
+ 
+         if (flag1) {
+-            for (iterator = arraylist.iterator(); iterator.hasNext(); j = a(chunksection1.getSkyLightArray().a(), packetplayoutmapchunk_chunkmap.a, j)) {
+-                chunksection1 = (ChunkSection) iterator.next();
++            for (int sectionIndex = 0; sectionIndex < achunksection.length; ++sectionIndex) {
++                if ((selectedSections & 1 << sectionIndex) != 0) {
++                    offset = a(
++                            achunksection[sectionIndex].getSkyLightArray().a(),
++                            packetplayoutmapchunk_chunkmap.a,
++                            offset);
++                }
+             }
+         }
+ 
+         if (flag) {
+-            a(chunk.getBiomeIndex(), packetplayoutmapchunk_chunkmap.a, j);
++            a(chunk.getBiomeIndex(), packetplayoutmapchunk_chunkmap.a, offset);
+         }
+ 
+         return packetplayoutmapchunk_chunkmap;
++        // KHopeSpigot end
+     }
+ 
+     private static int a(byte[] abyte, byte[] abyte1, int i) {
+diff --git a/src/main/java/net/minecraft/server/PlayerChunkMap.java b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+index e076b9c49..c872cb15f 100644
+--- a/src/main/java/net/minecraft/server/PlayerChunkMap.java
++++ b/src/main/java/net/minecraft/server/PlayerChunkMap.java
+@@ -14,7 +14,6 @@ import org.apache.logging.log4j.Logger;
+ // CraftBukkit start
+ import java.util.Collections;
+ import java.util.Queue;
+-import java.util.LinkedList;
+ import org.bukkit.craftbukkit.chunkio.ChunkIOExecutor;
+ import java.util.HashMap;
+ // CraftBukkit end
+@@ -294,7 +293,9 @@ public class PlayerChunkMap {
+         entityplayer.e = entityplayer.locZ;
+ 
+         // CraftBukkit start - Load nearby chunks first
+-        List<ChunkCoordIntPair> chunkList = new LinkedList<ChunkCoordIntPair>();
++        final int khopeDiameter = entityplayer.viewDistance * 2 + 1;
++        List<ChunkCoordIntPair> chunkList =
++                new ArrayList<ChunkCoordIntPair>(khopeDiameter * khopeDiameter);
+ 
+         // PaperSpigot start - Player view distance API
+         for (int k = i - entityplayer.viewDistance; k <= i + entityplayer.viewDistance; ++k) {
+@@ -398,15 +399,12 @@ public class PlayerChunkMap {
+             int i1 = entityplayer.viewDistance; // PaperSpigot - Player view distance API
+             int j1 = i - k;
+             int k1 = j - l;
+-            List<ChunkCoordIntPair> chunksToLoad = new LinkedList<ChunkCoordIntPair>(); // CraftBukkit
+-
+             if (j1 != 0 || k1 != 0) {
++                // KHopeSpigot - 0161: 0151 rebuilds the missing view from the
++                // player's actual subscriptions below. Avoid creating the legacy
++                // entering-chunk list and its short-lived ChunkCoordIntPair objects.
+                 for (int l1 = i - i1; l1 <= i + i1; ++l1) {
+                     for (int i2 = j - i1; i2 <= j + i1; ++i2) {
+-                        if (!this.a(l1, i2, k, l, i1)) {
+-                            chunksToLoad.add(new ChunkCoordIntPair(l1, i2)); // CraftBukkit
+-                        }
+-
+                         if (!this.a(l1 - j1, i2 - k1, i, j, i1)) {
+                             PlayerChunkMap.PlayerChunk playerchunkmap_playerchunk = this.a(l1 - j1, i2 - k1, false);
+ 
+@@ -426,8 +424,8 @@ public class PlayerChunkMap {
+                 // Rebuild from the player's actual subscriptions. This keeps a
+                 // second teleport correct even if the first staged queue has
+                 // not drained yet.
+-                chunksToLoad = this.buildKhopeMissingView(entityplayer);
+-                this.applyOrQueueKhopePlayerChunks(entityplayer, chunksToLoad);
++                this.applyOrQueueKhopePlayerChunks(
++                        entityplayer, this.buildKhopeMissingView(entityplayer));
+ 
+                 if (j1 > 1 || j1 < -1 || k1 > 1 || k1 < -1) {
+                     Collections.sort(entityplayer.chunkCoordIntPairQueue, new ChunkCoordComparator(entityplayer));
+-- 
+2.51.0.windows.1
+
