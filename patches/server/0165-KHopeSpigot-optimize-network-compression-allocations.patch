@@ -1,0 +1,178 @@
+From 12e20817f5c022a676a0718f0a23f4608f5fb567 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 15:48:28 +0200
+Subject: [PATCH] KHopeSpigot: optimize network compression allocations
+
+---
+ .../minecraft/server/PacketCompressor.java    | 46 +++++++++++++++++--
+ .../minecraft/server/PacketDecompressor.java  | 37 +++++++++++++--
+ .../net/minecraft/server/PacketEncoder.java   |  9 ++--
+ 3 files changed, 79 insertions(+), 13 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/PacketCompressor.java b/src/main/java/net/minecraft/server/PacketCompressor.java
+index 8107890ff..494905caf 100644
+--- a/src/main/java/net/minecraft/server/PacketCompressor.java
++++ b/src/main/java/net/minecraft/server/PacketCompressor.java
+@@ -7,6 +7,15 @@ import java.util.zip.Deflater;
+ 
+ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+ 
++    private static final int KHOPE_INITIAL_INPUT_BUFFER_SIZE = 8192;
++    private static final int KHOPE_MAX_CACHED_INPUT_BUFFER_SIZE = 2097152;
++    private static final ThreadLocal<byte[]> KHOPE_INPUT_BUFFER = new ThreadLocal<byte[]>() {
++        @Override
++        protected byte[] initialValue() {
++            return new byte[KHOPE_INITIAL_INPUT_BUFFER_SIZE];
++        }
++    };
++
+     private final byte[] a = new byte[8192];
+     private final Deflater b;
+     private int c;
+@@ -24,11 +33,19 @@ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+             packetdataserializer.b(0);
+             packetdataserializer.writeBytes(bytebuf);
+         } else {
+-            byte[] abyte = new byte[i];
++            packetdataserializer.b(i);
+ 
+-            bytebuf.readBytes(abyte);
+-            packetdataserializer.b(abyte.length);
+-            this.b.setInput(abyte, 0, i);
++            // KHopeSpigot start - 0165 compression input allocation fast path
++            if (bytebuf.hasArray()) {
++                final int readerIndex = bytebuf.readerIndex();
++                this.b.setInput(bytebuf.array(), bytebuf.arrayOffset() + readerIndex, i);
++                bytebuf.skipBytes(i);
++            } else {
++                final byte[] input = khopeInputBuffer(i);
++                bytebuf.readBytes(input, 0, i);
++                this.b.setInput(input, 0, i);
++            }
++            // KHopeSpigot end
+             this.b.finish();
+ 
+             while (!this.b.finished()) {
+@@ -42,6 +59,27 @@ public class PacketCompressor extends MessageToByteEncoder<ByteBuf> {
+ 
+     }
+ 
++    private static byte[] khopeInputBuffer(int requiredSize) {
++        byte[] input = KHOPE_INPUT_BUFFER.get();
++
++        if (input.length >= requiredSize) {
++            return input;
++        }
++
++        if (requiredSize > KHOPE_MAX_CACHED_INPUT_BUFFER_SIZE) {
++            return new byte[requiredSize];
++        }
++
++        int newSize = input.length;
++        while (newSize < requiredSize) {
++            newSize <<= 1;
++        }
++
++        input = new byte[newSize];
++        KHOPE_INPUT_BUFFER.set(input);
++        return input;
++    }
++
+     public void a(int i) {
+         this.c = i;
+     }
+diff --git a/src/main/java/net/minecraft/server/PacketDecompressor.java b/src/main/java/net/minecraft/server/PacketDecompressor.java
+index 300d46475..b5bb3414d 100644
+--- a/src/main/java/net/minecraft/server/PacketDecompressor.java
++++ b/src/main/java/net/minecraft/server/PacketDecompressor.java
+@@ -10,6 +10,15 @@ import java.util.zip.Inflater;
+ 
+ public class PacketDecompressor extends ByteToMessageDecoder {
+ 
++    private static final int KHOPE_INITIAL_INPUT_BUFFER_SIZE = 8192;
++    private static final int KHOPE_MAX_CACHED_INPUT_BUFFER_SIZE = 2097152;
++    private static final ThreadLocal<byte[]> KHOPE_INPUT_BUFFER = new ThreadLocal<byte[]>() {
++        @Override
++        protected byte[] initialValue() {
++            return new byte[KHOPE_INITIAL_INPUT_BUFFER_SIZE];
++        }
++    };
++
+     private final Inflater a;
+     private int b;
+ 
+@@ -34,10 +43,11 @@ public class PacketDecompressor extends ByteToMessageDecoder {
+                     throw new DecoderException("Badly compressed packet - size of " + i + " is larger than protocol maximum of " + 2097152);
+                 }
+ 
+-                byte[] abyte = new byte[packetdataserializer.readableBytes()];
++                final int compressedSize = packetdataserializer.readableBytes();
++                final byte[] input = khopeInputBuffer(compressedSize);
+ 
+-                packetdataserializer.readBytes(abyte);
+-                this.a.setInput(abyte);
++                packetdataserializer.readBytes(input, 0, compressedSize);
++                this.a.setInput(input, 0, compressedSize);
+                 byte[] abyte1 = new byte[i];
+ 
+                 this.a.inflate(abyte1);
+@@ -48,6 +58,27 @@ public class PacketDecompressor extends ByteToMessageDecoder {
+         }
+     }
+ 
++    private static byte[] khopeInputBuffer(int requiredSize) {
++        byte[] input = KHOPE_INPUT_BUFFER.get();
++
++        if (input.length >= requiredSize) {
++            return input;
++        }
++
++        if (requiredSize > KHOPE_MAX_CACHED_INPUT_BUFFER_SIZE) {
++            return new byte[requiredSize];
++        }
++
++        int newSize = input.length;
++        while (newSize < requiredSize) {
++            newSize <<= 1;
++        }
++
++        input = new byte[newSize];
++        KHOPE_INPUT_BUFFER.set(input);
++        return input;
++    }
++
+     public void a(int i) {
+         this.b = i;
+     }
+diff --git a/src/main/java/net/minecraft/server/PacketEncoder.java b/src/main/java/net/minecraft/server/PacketEncoder.java
+index 9ebae0b5a..2846f82d9 100644
+--- a/src/main/java/net/minecraft/server/PacketEncoder.java
++++ b/src/main/java/net/minecraft/server/PacketEncoder.java
+@@ -20,10 +20,11 @@ public class PacketEncoder extends MessageToByteEncoder<Packet> {
+     }
+ 
+     protected void a(ChannelHandlerContext channelhandlercontext, Packet packet, ByteBuf bytebuf) throws Exception {
+-        Integer integer = ((EnumProtocol) channelhandlercontext.channel().attr(NetworkManager.c).get()).a(this.c, packet);
++        final EnumProtocol enumprotocol = (EnumProtocol) channelhandlercontext.channel().attr(NetworkManager.c).get();
++        Integer integer = enumprotocol.a(this.c, packet);
+ 
+         if (PacketEncoder.a.isDebugEnabled()) {
+-            PacketEncoder.a.debug(PacketEncoder.b, "OUT: [{}:{}] {}", new Object[]{channelhandlercontext.channel().attr(NetworkManager.c).get(), integer, packet.getClass().getName()});
++            PacketEncoder.a.debug(PacketEncoder.b, "OUT: [{}:{}] {}", new Object[]{enumprotocol, integer, packet.getClass().getName()});
+         }
+ 
+         if (integer == null) {
+@@ -34,10 +35,6 @@ public class PacketEncoder extends MessageToByteEncoder<Packet> {
+             packetdataserializer.b(integer);
+ 
+             try {
+-                if (packet instanceof PacketPlayOutNamedEntitySpawn) {
+-                    packet = packet;
+-                }
+-
+                 packet.b(packetdataserializer);
+             } catch (Throwable throwable) {
+                 PacketEncoder.a.error(throwable);
+-- 
+2.51.0.windows.1
+
