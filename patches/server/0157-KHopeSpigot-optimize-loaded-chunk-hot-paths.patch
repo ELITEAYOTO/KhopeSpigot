@@ -1,0 +1,196 @@
+From 92f48be0ea587caa41d4550dccd8bc1aa143bc59 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 11:43:54 +0200
+Subject: [PATCH] KHopeSpigot: optimize loaded chunk hot paths
+
+---
+ src/main/java/net/minecraft/server/World.java | 92 +++++++++----------
+ 1 file changed, 46 insertions(+), 46 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/World.java b/src/main/java/net/minecraft/server/World.java
+index a9d22c9bd..edc49bc97 100644
+--- a/src/main/java/net/minecraft/server/World.java
++++ b/src/main/java/net/minecraft/server/World.java
+@@ -266,9 +266,9 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public BiomeBase getBiome(final BlockPosition blockposition) {
+-        if (this.isLoaded(blockposition)) {
+-            Chunk chunk = this.getChunkAtWorldCoords(blockposition);
+-
++        // KHopeSpigot start - 0157 loaded-chunk lookup fast paths
++        final Chunk chunk = this.getChunkIfLoaded(blockposition);
++        if (chunk != null) {
+             try {
+                 return chunk.getBiome(blockposition, this.worldProvider.m());
+             } catch (Throwable throwable) {
+@@ -289,6 +289,7 @@ public abstract class World implements IBlockAccess {
+         } else {
+             return this.worldProvider.m().getBiome(blockposition, BiomeBase.PLAINS);
+         }
++        // KHopeSpigot end
+     }
+ 
+     public WorldChunkManager getWorldChunkManager() {
+@@ -770,11 +771,8 @@ public abstract class World implements IBlockAccess {
+         int i;
+ 
+         if (blockposition.getX() >= -30000000 && blockposition.getZ() >= -30000000 && blockposition.getX() < 30000000 && blockposition.getZ() < 30000000) {
+-            if (this.isChunkLoaded(blockposition.getX() >> 4, blockposition.getZ() >> 4, true)) {
+-                i = this.getChunkAt(blockposition.getX() >> 4, blockposition.getZ() >> 4).b(blockposition.getX() & 15, blockposition.getZ() & 15);
+-            } else {
+-                i = 0;
+-            }
++            final Chunk chunk = this.getChunkIfLoaded(blockposition);
++            i = chunk == null ? 0 : chunk.b(blockposition.getX() & 15, blockposition.getZ() & 15);
+         } else {
+             i = this.F() + 1;
+         }
+@@ -784,13 +782,8 @@ public abstract class World implements IBlockAccess {
+ 
+     public int b(int i, int j) {
+         if (i >= -30000000 && j >= -30000000 && i < 30000000 && j < 30000000) {
+-            if (!this.isChunkLoaded(i >> 4, j >> 4, true)) {
+-                return 0;
+-            } else {
+-                Chunk chunk = this.getChunkAt(i >> 4, j >> 4);
+-
+-                return chunk.v();
+-            }
++            final Chunk chunk = this.getChunkIfLoaded(i >> 4, j >> 4);
++            return chunk == null ? 0 : chunk.v();
+         } else {
+             return this.F() + 1;
+         }
+@@ -803,20 +796,16 @@ public abstract class World implements IBlockAccess {
+ 
+         if (!this.isValidLocation(blockposition)) {
+             return enumskyblock.c;
+-        } else if (!this.isLoaded(blockposition)) {
+-            return enumskyblock.c;
+         } else {
+-            Chunk chunk = this.getChunkAtWorldCoords(blockposition);
+-
+-            return chunk.getBrightness(enumskyblock, blockposition);
++            final Chunk chunk = this.getChunkIfLoaded(blockposition);
++            return chunk == null ? enumskyblock.c : chunk.getBrightness(enumskyblock, blockposition);
+         }
+     }
+ 
+     public void a(EnumSkyBlock enumskyblock, BlockPosition blockposition, int i) {
+         if (this.isValidLocation(blockposition)) {
+-            if (this.isLoaded(blockposition)) {
+-                Chunk chunk = this.getChunkAtWorldCoords(blockposition);
+-
++            final Chunk chunk = this.getChunkIfLoaded(blockposition);
++            if (chunk != null) {
+                 chunk.a(enumskyblock, blockposition, i);
+                 this.n(blockposition);
+             }
+@@ -1183,22 +1172,28 @@ public abstract class World implements IBlockAccess {
+         }
+         // CraftBukkit end
+ 
+-        if (!flag && !this.isChunkLoaded(i, j, true)) {
+-            entity.dead = true;
+-            return false;
++        final Chunk entityChunk;
++        if (flag) {
++            entityChunk = this.getChunkAt(i, j);
+         } else {
+-            if (entity instanceof EntityHuman) {
+-                EntityHuman entityhuman = (EntityHuman) entity;
+-
+-                this.players.add(entityhuman);
+-                this.everyoneSleeping();
++            entityChunk = this.getChunkIfLoaded(i, j);
++            if (entityChunk == null) {
++                entity.dead = true;
++                return false;
+             }
++        }
+ 
+-            this.getChunkAt(i, j).a(entity);
+-            this.entityList.add(entity);
+-            this.a(entity);
+-            return true;
++        if (entity instanceof EntityHuman) {
++            EntityHuman entityhuman = (EntityHuman) entity;
++
++            this.players.add(entityhuman);
++            this.everyoneSleeping();
+         }
++
++        entityChunk.a(entity);
++        this.entityList.add(entity);
++        this.a(entity);
++        return true;
+     }
+ 
+     protected void a(Entity entity) {
+@@ -1264,8 +1259,11 @@ public abstract class World implements IBlockAccess {
+         int i = entity.ae;
+         int j = entity.ag;
+ 
+-        if (entity.ad && this.isChunkLoaded(i, j, true)) {
+-            this.getChunkAt(i, j).b(entity);
++        if (entity.ad) {
++            final Chunk loadedChunk = this.getChunkIfLoaded(i, j);
++            if (loadedChunk != null) {
++                loadedChunk.b(entity);
++            }
+         }
+ 
+         // CraftBukkit start - Decrement loop variable field if we've already ticked this entity
+@@ -2856,8 +2854,9 @@ public abstract class World implements IBlockAccess {
+ 
+         for (int i1 = i; i1 <= j; ++i1) {
+             for (int j1 = k; j1 <= l; ++j1) {
+-                if (this.isChunkLoaded(i1, j1, true)) {
+-                    this.getChunkAt(i1, j1).a(oclass, axisalignedbb, arraylist, predicate);
++                final Chunk chunk = this.getChunkIfLoaded(i1, j1);
++                if (chunk != null) {
++                    chunk.a(oclass, axisalignedbb, arraylist, predicate);
+                 }
+             }
+         }
+@@ -2891,8 +2890,9 @@ public abstract class World implements IBlockAccess {
+     }
+ 
+     public void b(BlockPosition blockposition, TileEntity tileentity) {
+-        if (this.isLoaded(blockposition)) {
+-            this.getChunkAtWorldCoords(blockposition).e();
++        final Chunk chunk = this.getChunkIfLoaded(blockposition);
++        if (chunk != null) {
++            chunk.e();
+         }
+ 
+     }
+@@ -3391,9 +3391,8 @@ public abstract class World implements IBlockAccess {
+             EnumDirection enumdirection = (EnumDirection) iterator.next();
+             BlockPosition blockposition1 = blockposition.shift(enumdirection);
+ 
+-            if (this.isLoaded(blockposition1)) {
+-                IBlockData iblockdata = this.getType(blockposition1);
+-
++            IBlockData iblockdata = this.getTypeIfLoaded(blockposition1);
++            if (iblockdata != null) {
+                 if (Blocks.UNPOWERED_COMPARATOR.e(iblockdata.getBlock())) {
+                     iblockdata.getBlock().doPhysics(this, blockposition1, iblockdata, block);
+                 } else if (iblockdata.getBlock().isOccluding()) {
+@@ -3412,9 +3411,10 @@ public abstract class World implements IBlockAccess {
+         long i = 0L;
+         float f = 0.0F;
+ 
+-        if (this.isLoaded(blockposition)) {
++        final Chunk chunk = this.getChunkIfLoaded(blockposition);
++        if (chunk != null) {
+             f = this.y();
+-            i = this.getChunkAtWorldCoords(blockposition).w();
++            i = chunk.w();
+         }
+ 
+         return new DifficultyDamageScaler(this.getDifficulty(), this.getDayTime(), i, f);
+-- 
+2.51.0.windows.1
+
