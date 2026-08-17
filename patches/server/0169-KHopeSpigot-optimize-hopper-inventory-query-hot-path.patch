@@ -1,0 +1,79 @@
+From 98f3e58365cabff8d63e2be141611a9e0fa8a733 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 16:33:05 +0200
+Subject: [PATCH] KHopeSpigot: optimize hopper inventory query hot paths
+
+---
+ .../minecraft/server/TileEntityHopper.java    | 26 ++++++++++---------
+ 1 file changed, 14 insertions(+), 12 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/TileEntityHopper.java b/src/main/java/net/minecraft/server/TileEntityHopper.java
+index 023c1aa9f..4c55dcb9a 100644
+--- a/src/main/java/net/minecraft/server/TileEntityHopper.java
++++ b/src/main/java/net/minecraft/server/TileEntityHopper.java
+@@ -1,6 +1,5 @@
+ package net.minecraft.server;
+ 
+-import java.util.Iterator;
+ import java.util.List;
+ 
+ // CraftBukkit start
+@@ -258,8 +257,9 @@ public class TileEntityHopper extends TileEntityContainer implements IHopper, IU
+                 return false;
+             } else {
+                 for (int i = 0; i < this.getSize(); ++i) {
+-                    if (this.getItem(i) != null) {
+-                        ItemStack itemstack = this.getItem(i).cloneItemStack();
++                    final ItemStack currentItem = this.getItem(i);
++                    if (currentItem != null) {
++                        ItemStack itemstack = currentItem.cloneItemStack();
+                         // ItemStack itemstack1 = addItem(iinventory, this.splitStack(i, 1), enumdirection);
+ 
+                         // CraftBukkit start - Call event when pushing items into other inventories
+@@ -381,15 +381,14 @@ public class TileEntityHopper extends TileEntityContainer implements IHopper, IU
+                 }
+             }
+         } else {
+-            Iterator iterator = a(ihopper.getWorld(), ihopper.A(), ihopper.B() + 1.0D, ihopper.C()).iterator();
+-
+-            while (iterator.hasNext()) {
+-                EntityItem entityitem = (EntityItem) iterator.next();
+-
+-                if (a((IInventory) ihopper, entityitem)) {
++            // KHopeSpigot start - avoid iterator allocation when collecting loose items
++            final List<EntityItem> entityItems = a(ihopper.getWorld(), ihopper.A(), ihopper.B() + 1.0D, ihopper.C());
++            for (int itemIndex = 0; itemIndex < entityItems.size(); ++itemIndex) {
++                if (a((IInventory) ihopper, entityItems.get(itemIndex))) {
+                     return true;
+                 }
+             }
++            // KHopeSpigot end
+         }
+ 
+         return false;
+@@ -560,8 +559,11 @@ public class TileEntityHopper extends TileEntityContainer implements IHopper, IU
+         int j = MathHelper.floor(d1);
+         int k = MathHelper.floor(d2);
+         BlockPosition blockposition = new BlockPosition(i, j, k);
+-        if ( !world.isLoaded( blockposition ) ) return null; // Spigot
+-        Block block = world.getType(blockposition).getBlock();
++        // KHopeSpigot start - collapse isLoaded + getType into one loaded-chunk lookup
++        final IBlockData blockData = world.getTypeIfLoaded(blockposition);
++        if (blockData == null) return null;
++        Block block = blockData.getBlock();
++        // KHopeSpigot end
+ 
+         if (block.isTileEntity()) {
+             TileEntity tileentity = world.getTileEntity(blockposition);
+@@ -577,7 +579,7 @@ public class TileEntityHopper extends TileEntityContainer implements IHopper, IU
+         if (object == null) {
+             List list = world.a((Entity) null, new AxisAlignedBB(d0 - 0.5D, d1 - 0.5D, d2 - 0.5D, d0 + 0.5D, d1 + 0.5D, d2 + 0.5D), IEntitySelector.c);
+ 
+-            if (list.size() > 0) {
++            if (!list.isEmpty()) {
+                 object = (IInventory) list.get(world.random.nextInt(list.size()));
+             }
+         }
+-- 
+2.51.0.windows.1
+
