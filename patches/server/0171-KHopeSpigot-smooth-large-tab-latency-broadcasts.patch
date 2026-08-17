@@ -1,0 +1,89 @@
+From c784ec9bf847309fb22073265dc625ed1fb8be29 Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 17:20:58 +0200
+Subject: [PATCH] KHopeSpigot: smooth large tab latency broadcasts
+
+---
+ .../java/net/minecraft/server/PlayerList.java | 55 ++++++++++++++++++-
+ 1 file changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/src/main/java/net/minecraft/server/PlayerList.java b/src/main/java/net/minecraft/server/PlayerList.java
+index 9b6214d1..61853d1a 100644
+--- a/src/main/java/net/minecraft/server/PlayerList.java
++++ b/src/main/java/net/minecraft/server/PlayerList.java
+@@ -62,6 +62,13 @@ public abstract class PlayerList {
+     private WorldSettings.EnumGamemode s;
+     private boolean t;
+     private int u;
++    // KHopeSpigot start - smooth large periodic tab latency broadcasts
++    private static final int KHOPE_LATENCY_BATCH_THRESHOLD = 128;
++    private static final int KHOPE_LATENCY_RECIPIENTS_PER_TICK = 64;
++    private PacketPlayOutPlayerInfo khopeLatencyPacket;
++    private EntityPlayer[] khopeLatencyRecipients;
++    private int khopeLatencyRecipientIndex;
++    // KHopeSpigot end
+ 
+     // CraftBukkit start
+     private CraftServer cserver;
+@@ -900,11 +907,57 @@ public abstract class PlayerList {
+     }
+ 
+     public void tick() {
++        // KHopeSpigot start - smooth large periodic tab latency broadcasts
++        if (this.khopeLatencyPacket != null) {
++            this.khopeFlushLatencyBatch();
++        }
++
+         if (++this.u > 600) {
+-            this.sendAll(new PacketPlayOutPlayerInfo(PacketPlayOutPlayerInfo.EnumPlayerInfoAction.UPDATE_LATENCY, this.players));
++            PacketPlayOutPlayerInfo latencyPacket = new PacketPlayOutPlayerInfo(PacketPlayOutPlayerInfo.EnumPlayerInfoAction.UPDATE_LATENCY, this.players);
++            final int playerCount = this.players.size();
++
++            if (playerCount > KHOPE_LATENCY_BATCH_THRESHOLD) {
++                this.khopeLatencyPacket = latencyPacket;
++                this.khopeLatencyRecipients = this.players.toArray(new EntityPlayer[playerCount]);
++                this.khopeLatencyRecipientIndex = 0;
++                this.khopeFlushLatencyBatch();
++            } else {
++                this.sendAll(latencyPacket);
++            }
++
+             this.u = 0;
+         }
++        // KHopeSpigot end
++    }
+ 
++    private void khopeFlushLatencyBatch() {
++        final PacketPlayOutPlayerInfo packet = this.khopeLatencyPacket;
++        final EntityPlayer[] recipients = this.khopeLatencyRecipients;
++
++        if (packet == null || recipients == null) {
++            this.khopeLatencyPacket = null;
++            this.khopeLatencyRecipients = null;
++            this.khopeLatencyRecipientIndex = 0;
++            return;
++        }
++
++        final int end = Math.min(
++                this.khopeLatencyRecipientIndex + KHOPE_LATENCY_RECIPIENTS_PER_TICK,
++                recipients.length);
++
++        for (int i = this.khopeLatencyRecipientIndex; i < end; ++i) {
++            final EntityPlayer recipient = recipients[i];
++            if (recipient != null && recipient.playerConnection != null) {
++                recipient.playerConnection.sendPacket(packet);
++            }
++        }
++
++        this.khopeLatencyRecipientIndex = end;
++        if (end >= recipients.length) {
++            this.khopeLatencyPacket = null;
++            this.khopeLatencyRecipients = null;
++            this.khopeLatencyRecipientIndex = 0;
++        }
+     }
+ 
+     public void sendAll(Packet packet) {
+-- 
+2.51.0.windows.1
+
