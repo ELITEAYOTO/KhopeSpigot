@@ -1,0 +1,84 @@
+From 2788df4f5a6fbf5ff6d561f3d765dd171968e41e Mon Sep 17 00:00:00 2001
+From: Timothe <timothe.renou@gmail.com>
+Date: Mon, 17 Aug 2026 17:08:34 +0200
+Subject: [PATCH] KHopeSpigot: optimize entity metadata serialization
+ allocations
+
+---
+ .../net/minecraft/server/DataWatcher.java     | 24 ++++++++++++-------
+ 1 file changed, 16 insertions(+), 8 deletions(-)
+
+diff --git a/src/main/java/net/minecraft/server/DataWatcher.java b/src/main/java/net/minecraft/server/DataWatcher.java
+index 518e8f37..eda530c8 100644
+--- a/src/main/java/net/minecraft/server/DataWatcher.java
++++ b/src/main/java/net/minecraft/server/DataWatcher.java
+@@ -1,12 +1,12 @@
+ package net.minecraft.server;
+ 
+-import com.google.common.collect.Lists;
+ import com.google.common.collect.Maps;
+ import java.io.IOException;
+ import java.util.ArrayList;
+ import java.util.Iterator;
+ import java.util.List;
+ import java.util.Map;
++import java.util.RandomAccess;
+ import java.util.concurrent.locks.ReadWriteLock;
+ import java.util.concurrent.locks.ReentrantReadWriteLock;
+ import org.apache.commons.lang3.ObjectUtils;
+@@ -134,13 +134,21 @@ public class DataWatcher {
+ 
+     public static void a(List<DataWatcher.WatchableObject> list, PacketDataSerializer packetdataserializer) throws IOException {
+         if (list != null) {
+-            Iterator iterator = list.iterator();
++            // KHopeSpigot start - avoid per-recipient iterator allocation for metadata packets
++            if (list instanceof RandomAccess) {
++                for (int i = 0, size = list.size(); i < size; ++i) {
++                    a(packetdataserializer, list.get(i));
++                }
++            } else {
++                Iterator iterator = list.iterator();
+ 
+-            while (iterator.hasNext()) {
+-                DataWatcher.WatchableObject datawatcher_watchableobject = (DataWatcher.WatchableObject) iterator.next();
++                while (iterator.hasNext()) {
++                    DataWatcher.WatchableObject datawatcher_watchableobject = (DataWatcher.WatchableObject) iterator.next();
+ 
+-                a(packetdataserializer, datawatcher_watchableobject);
++                    a(packetdataserializer, datawatcher_watchableobject);
++                }
+             }
++            // KHopeSpigot end
+         }
+ 
+         packetdataserializer.writeByte(127);
+@@ -159,7 +167,7 @@ public class DataWatcher {
+                 if (datawatcher_watchableobject.d()) {
+                     datawatcher_watchableobject.a(false);
+                     if (arraylist == null) {
+-                        arraylist = Lists.newArrayList();
++                        arraylist = new ArrayList(4);
+                     }
+ 
+                    // Spigot start - copy ItemStacks to prevent ConcurrentModificationExceptions
+@@ -199,7 +207,7 @@ public class DataWatcher {
+     }
+ 
+     public List<DataWatcher.WatchableObject> c() {
+-        ArrayList arraylist = Lists.newArrayList(); // Spigot
++        ArrayList arraylist = new ArrayList(this.dataValues.size()); // KHopeSpigot - exact capacity for full metadata snapshot
+ 
+         // this.f.readLock().lock(); // PandaSpigot
+ 
+@@ -278,7 +286,7 @@ public class DataWatcher {
+ 
+         for (byte b0 = packetdataserializer.readByte(); b0 != 127; b0 = packetdataserializer.readByte()) {
+             if (arraylist == null) {
+-                arraylist = Lists.newArrayList();
++                arraylist = new ArrayList(4);
+             }
+ 
+             int i = (b0 & 224) >> 5;
+-- 
+2.51.0.windows.1
+
